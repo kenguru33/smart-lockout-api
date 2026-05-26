@@ -12,9 +12,9 @@ using SmartLockoutApi.Validation;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// The PowerShell singleton caches an InitialSessionState (with the ADFS
-// module imported) across requests; each request gets a fresh PowerShell
-// instance inside GetAsync.
+// The PowerShell singleton opens a long-lived Runspace at construction and
+// imports the ADFS module via -UseWindowsPowerShell into it; each request
+// gets a fresh PowerShell instance attached to that runspace inside GetAsync.
 builder.Services.AddSingleton<IAdfsSmartLockoutService, PowerShellAdfsSmartLockoutService>();
 builder.Services.AddSingleton<ApiKeyEndpointFilter>();
 
@@ -42,6 +42,10 @@ builder.Services.AddSwaggerGen(options =>
 });
 
 var app = builder.Build();
+
+// Force the PowerShell service to construct now so an ADFS-module import
+// failure stops startup instead of becoming a 500 on the first request.
+app.Services.GetRequiredService<IAdfsSmartLockoutService>();
 
 if (app.Environment.IsDevelopment())
 {

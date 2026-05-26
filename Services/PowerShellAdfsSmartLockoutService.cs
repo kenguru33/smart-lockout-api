@@ -7,69 +7,134 @@ namespace SmartLockoutApi.Services;
 
 // IMPORTANT: This implementation can only run on a Windows host where the
 // AD FS PowerShell module is installed and importable — i.e. an AD FS server
-// itself, or an admin workstation with AD FS RSAT. On any other host the
-// Import-Module ADFS call will fail and every request will return Error.
-public sealed class PowerShellAdfsSmartLockoutService : IAdfsSmartLockoutService
+// itself, or an admin workstation with AD FS RSAT.
+//
+// Microsoft.PowerShell.SDK hosts PowerShell 7, but the ADFS module is
+// Windows PowerShell 5.1 only, so we import it via -UseWindowsPowerShell.
+// That spins up a hidden WinPS 5.1 compat process and creates proxy
+// functions in our runspace. The runspace is opened once and reused across
+// requests so the compat session and proxies survive for the lifetime of
+// the service; pipelines are serialized via a semaphore because a single
+// Runspace processes one pipeline at a time.
+public sealed class PowerShellAdfsSmartLockoutService : IAdfsSmartLockoutService, IDisposable
 {
     private readonly ILogger<PowerShellAdfsSmartLockoutService> _logger;
-    private readonly InitialSessionState _sessionState;
+    private readonly Runspace _runspace;
+    private readonly SemaphoreSlim _gate = new(1, 1);
 
     public PowerShellAdfsSmartLockoutService(ILogger<PowerShellAdfsSmartLockoutService> logger)
     {
         _logger = logger;
-        _sessionState = InitialSessionState.CreateDefault();
-        _sessionState.ImportPSModule(new[] { "ADFS" });
-    }
+        _runspace = RunspaceFactory.CreateRunspace(InitialSessionState.CreateDefault());
+        _runspace.Open();
 
-    public async Task<SmartLockoutResult> GetAsync(string upn, CancellationToken cancellationToken)
-    {
-        using var ps = PowerShell.Create(_sessionState);
-
-        // Pass UPN as a typed parameter — never concatenate into a script string.
-        // This is the primary defense against PowerShell injection; UpnValidator
-        // is defense-in-depth.
-        ps.AddCommand("Get-AdfsAccountActivity").AddParameter("Identity", upn);
-
-        PSDataCollection<PSObject> results;
         try
         {
-            results = await ps.InvokeAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+            ImportAdfsModule();
         }
-        catch (OperationCanceledException)
+        catch
         {
+            _runspace.Dispose();
+            _gate.Dispose();
             throw;
+        }
+
+        _logger.LogInformation("ADFS module loaded via Windows PowerShell compatibility session");
+    }
+
+    private void ImportAdfsModule()
+    {
+        using var ps = PowerShell.Create();
+        ps.Runspace = _runspace;
+        ps.AddCommand("Import-Module")
+          .AddParameter("Name", "ADFS")
+          .AddParameter("UseWindowsPowerShell")
+          .AddParameter("ErrorAction", "Stop");
+
+        try
+        {
+            ps.Invoke();
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "PowerShell invocation threw for UPN {Upn}", upn);
-            return new SmartLockoutResult.Error($"PowerShell invocation failed: {ex.Message}");
+            throw new InvalidOperationException(
+                "Failed to import the ADFS PowerShell module via -UseWindowsPowerShell. " +
+                "Verify the host has the ADFS module installed and the process account has the required rights.",
+                ex);
         }
 
         if (ps.HadErrors)
         {
-            var firstError = ps.Streams.Error.FirstOrDefault();
-            var category = firstError?.CategoryInfo?.Category;
+            var err = ps.Streams.Error.FirstOrDefault()?.ToString() ?? "Unknown error";
+            throw new InvalidOperationException(
+                $"Failed to import the ADFS PowerShell module via -UseWindowsPowerShell: {err}");
+        }
+    }
 
-            if (category == ErrorCategory.ObjectNotFound)
+    public async Task<SmartLockoutResult> GetAsync(string upn, CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var ps = PowerShell.Create();
+            ps.Runspace = _runspace;
+
+            // Pass UPN as a typed parameter — never concatenate into a script string.
+            // This is the primary defense against PowerShell injection; UpnValidator
+            // is defense-in-depth.
+            ps.AddCommand("Get-AdfsAccountActivity").AddParameter("Identity", upn);
+
+            PSDataCollection<PSObject> results;
+            try
             {
-                _logger.LogInformation("No AD FS account activity for UPN {Upn}", upn);
+                results = await ps.InvokeAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "PowerShell invocation threw for UPN {Upn}", upn);
+                return new SmartLockoutResult.Error($"PowerShell invocation failed: {ex.Message}");
+            }
+
+            if (ps.HadErrors)
+            {
+                var firstError = ps.Streams.Error.FirstOrDefault();
+                var category = firstError?.CategoryInfo?.Category;
+
+                if (category == ErrorCategory.ObjectNotFound)
+                {
+                    _logger.LogInformation("No AD FS account activity for UPN {Upn}", upn);
+                    return new SmartLockoutResult.NotFound(upn);
+                }
+
+                var message = firstError?.ToString() ?? "Unknown PowerShell error";
+                _logger.LogError("PowerShell reported errors for UPN {Upn}: {Message}", upn, message);
+                return new SmartLockoutResult.Error(message);
+            }
+
+            if (results.Count == 0)
+            {
+                _logger.LogInformation("Get-AdfsAccountActivity returned no rows for UPN {Upn}", upn);
                 return new SmartLockoutResult.NotFound(upn);
             }
 
-            var message = firstError?.ToString() ?? "Unknown PowerShell error";
-            _logger.LogError("PowerShell reported errors for UPN {Upn}: {Message}", upn, message);
-            return new SmartLockoutResult.Error(message);
+            var activity = results[0];
+            var response = Project(upn, activity);
+            return new SmartLockoutResult.Found(response);
         }
-
-        if (results.Count == 0)
+        finally
         {
-            _logger.LogInformation("Get-AdfsAccountActivity returned no rows for UPN {Upn}", upn);
-            return new SmartLockoutResult.NotFound(upn);
+            _gate.Release();
         }
+    }
 
-        var activity = results[0];
-        var response = Project(upn, activity);
-        return new SmartLockoutResult.Found(response);
+    public void Dispose()
+    {
+        _gate.Dispose();
+        _runspace.Dispose();
     }
 
     private static SmartLockoutResponse Project(string upn, PSObject activity)
