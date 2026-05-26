@@ -1,9 +1,7 @@
 // SmartLockoutApi — internal AD FS Extranet Smart Lockout query API.
 //
-// RUNTIME: in non-Development environments the process must run on a Windows
-// host where the "ADFS" PowerShell module is available (an AD FS server, or
-// an admin host with AD FS RSAT). In Development a mock service stands in so
-// the API can be exercised end-to-end without AD FS.
+// RUNTIME: the process must run on a Windows host where the "ADFS" PowerShell
+// module is available (an AD FS server, or an admin host with AD FS RSAT).
 //
 // Auth: X-API-Key header, validated by ApiKeyEndpointFilter against
 // ApiKey:Keys from configuration. TLS is the deployer's responsibility.
@@ -14,18 +12,10 @@ using SmartLockoutApi.Validation;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// In Development the ADFS PS module is usually absent, so substitute a mock.
 // The PowerShell singleton caches an InitialSessionState (with the ADFS
 // module imported) across requests; each request gets a fresh PowerShell
 // instance inside GetAsync.
-if (builder.Environment.IsDevelopment())
-{
-    builder.Services.AddSingleton<IAdfsSmartLockoutService, MockAdfsSmartLockoutService>();
-}
-else
-{
-    builder.Services.AddSingleton<IAdfsSmartLockoutService, PowerShellAdfsSmartLockoutService>();
-}
+builder.Services.AddSingleton<IAdfsSmartLockoutService, PowerShellAdfsSmartLockoutService>();
 builder.Services.AddSingleton<ApiKeyEndpointFilter>();
 
 builder.Services.AddEndpointsApiExplorer();

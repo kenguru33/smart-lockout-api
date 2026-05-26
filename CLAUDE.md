@@ -15,16 +15,9 @@ from non-AD FS hosts without granting broader access.
 
 ## Hard runtime requirement
 
-In any environment **other than Development**, the process must run on a
-Windows host where the `ADFS` PowerShell module is importable (an AD FS server
-itself, or an admin host with AD FS RSAT). The Development environment uses
-`MockAdfsSmartLockoutService` instead, so the API can be exercised end-to-end
-on Linux/macOS dev machines.
-
-Reserved UPN local-parts in the mock (case-insensitive):
-`locked@*` → 200 with `isLockedOut=true`; `notfound@*` → 404;
-`error@*` → 500; anything else → 200 with a randomized record
-(per-request, so the same UPN can come back locked or clean).
+The process must run on a Windows host where the `ADFS` PowerShell module is
+importable (an AD FS server itself, or an admin host with AD FS RSAT). There
+is no mock — every environment, including Development, calls real PowerShell.
 
 ## Commands
 
@@ -34,7 +27,7 @@ dotnet build             # build, with TreatWarningsAsErrors=true
 dotnet run               # run; Swagger at /swagger only in Development
 ```
 
-Smoke-test without AD FS:
+Smoke-test (the 200 path requires running on an AD FS host):
 
 ```
 curl -i http://127.0.0.1:5199/api/adfs/smart-lockout/not-a-upn          # → 400
@@ -57,15 +50,10 @@ The endpoint in `Program.cs` is intentionally thin. All real work lives behind
 - `Services/SmartLockoutResult.cs` — closed sum type with three cases:
   `Found(response)`, `NotFound(upn)`, `Error(message)`. The service never
   throws for expected outcomes; it returns one of these.
-- `Services/PowerShellAdfsSmartLockoutService.cs` — production implementation.
+- `Services/PowerShellAdfsSmartLockoutService.cs` — the only implementation.
   Registered as a singleton so its cached `InitialSessionState` (with the
   `ADFS` module imported) is reused across requests; each request still gets
-  a fresh `PowerShell` instance. Registered only when the host is **not** in
-  the Development environment.
-- `Services/MockAdfsSmartLockoutService.cs` — dev-only stand-in. Registered
-  when `IHostEnvironment.IsDevelopment()` is true. Same `IAdfsSmartLockoutService`
-  contract; returns canned `Found`/`NotFound`/`Error` results steered by the
-  UPN's local-part. Do not add real AD FS calls here.
+  a fresh `PowerShell` instance.
 - `Validation/UpnValidator.cs` — strict regex + length cap. Source-generated
   regex via `[GeneratedRegex]`.
 - `Dtos/SmartLockoutResponse.cs` — the 200 response shape.

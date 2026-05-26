@@ -38,10 +38,10 @@ GET /api/adfs/smart-lockout/{upn}
 
 ## 1. Dev setup
 
-Works on Windows, Linux, or macOS. In the Development environment a mock
-service stands in for AD FS, so every response shape (200, 404, 500) can be
-exercised without a real AD FS host. The PowerShell-backed implementation
-is only wired up in non-Development environments.
+The app builds on Windows, Linux, or macOS, but `GET /api/adfs/smart-lockout`
+only returns a real 200/404 when running on a Windows host with the `ADFS`
+PowerShell module importable (an AD FS server or a host with AD FS RSAT).
+On other hosts the endpoint returns 500 because `Import-Module ADFS` fails.
 
 Prerequisites:
 
@@ -80,8 +80,8 @@ Swagger UI is enabled in `Development` only:
 http://localhost:5140/swagger
 ```
 
-Smoke-test from any host (no AD FS needed — the Development mock returns
-realistic data):
+Smoke-test the auth and validation paths from any host (the AD FS-backed
+200/404 paths only work on a real AD FS host — see §4):
 
 ```
 # 401 — no API key
@@ -91,19 +91,10 @@ curl -i http://localhost:5140/api/adfs/smart-lockout/not-a-upn
 curl -i -H "X-API-Key: dev-only-do-not-use-in-prod" \
   http://localhost:5140/api/adfs/smart-lockout/not-a-upn
 
-# 200 — mocked, non-locked record
+# 500 on non-AD FS hosts (Import-Module ADFS fails); 200/404 on an AD FS host
 curl -i -H "X-API-Key: dev-only-do-not-use-in-prod" \
   http://localhost:5140/api/adfs/smart-lockout/alice@example.com
 ```
-
-The dev mock steers its response off the UPN's local-part (case-insensitive):
-
-| Local-part      | Mock response                       |
-|-----------------|-------------------------------------|
-| `locked@…`      | 200 with `isLockedOut: true`        |
-| `notfound@…`    | 404                                 |
-| `error@…`       | 500                                 |
-| anything else   | 200 with a clean, non-locked record |
 
 The dev key `dev-only-do-not-use-in-prod` lives in
 `appsettings.Development.json` and is intentionally non-secret. Production
