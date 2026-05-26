@@ -1,25 +1,55 @@
 // SmartLockoutApi — internal AD FS Extranet Smart Lockout query API.
 //
-// RUNTIME REQUIREMENT: this process must run on a Windows host where the
-// "ADFS" PowerShell module is available (an AD FS server itself, or an
-// admin host with AD FS RSAT). On any other host the PowerShell invocation
-// will fail with "module not found" and every request returns 500.
+// RUNTIME: in non-Development environments the process must run on a Windows
+// host where the "ADFS" PowerShell module is available (an AD FS server, or
+// an admin host with AD FS RSAT). In Development a mock service stands in so
+// the API can be exercised end-to-end without AD FS.
 //
-// DO NOT EXPOSE PUBLICLY. There is no authentication wired up yet —
-// see the TODO in MapGet below.
+// Auth: X-API-Key header, validated by ApiKeyEndpointFilter against
+// ApiKey:Keys from configuration. TLS is the deployer's responsibility.
 
+using Microsoft.OpenApi.Models;
 using SmartLockoutApi.Services;
 using SmartLockoutApi.Validation;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Singleton: the cached InitialSessionState (with ADFS module import) is
-// reused across requests; each request gets a fresh PowerShell instance
-// inside GetAsync.
-builder.Services.AddSingleton<IAdfsSmartLockoutService, PowerShellAdfsSmartLockoutService>();
+// In Development the ADFS PS module is usually absent, so substitute a mock.
+// The PowerShell singleton caches an InitialSessionState (with the ADFS
+// module imported) across requests; each request gets a fresh PowerShell
+// instance inside GetAsync.
+if (builder.Environment.IsDevelopment())
+{
+    builder.Services.AddSingleton<IAdfsSmartLockoutService, MockAdfsSmartLockoutService>();
+}
+else
+{
+    builder.Services.AddSingleton<IAdfsSmartLockoutService, PowerShellAdfsSmartLockoutService>();
+}
+builder.Services.AddSingleton<ApiKeyEndpointFilter>();
 
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddSwaggerGen(options =>
+{
+    options.AddSecurityDefinition("ApiKey", new OpenApiSecurityScheme
+    {
+        Name = ApiKeyEndpointFilter.HeaderName,
+        In = ParameterLocation.Header,
+        Type = SecuritySchemeType.ApiKey,
+        Description = "API key. Dev value: dev-only-do-not-use-in-prod"
+    });
+    options.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        [new OpenApiSecurityScheme
+        {
+            Reference = new OpenApiReference
+            {
+                Type = ReferenceType.SecurityScheme,
+                Id = "ApiKey"
+            }
+        }] = Array.Empty<string>()
+    });
+});
 
 var app = builder.Build();
 
@@ -29,10 +59,14 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-// TODO(auth): require authentication before deploying anywhere reachable.
-// Preferred options: Windows Authentication (Negotiate/Kerberos) for an
-// on-prem AD FS host, or Microsoft.Identity.Web for Entra ID. Until that
-// is in place, bind the listener to a non-routable interface only.
+var configuredKeys = builder.Configuration.GetSection("ApiKey:Keys").Get<string[]>() ?? Array.Empty<string>();
+if (!configuredKeys.Any(k => !string.IsNullOrWhiteSpace(k)))
+{
+    app.Logger.LogWarning(
+        "ApiKey:Keys is empty; every request will be rejected with 401. " +
+        "Set ApiKey__Keys__0 (and __1 during rotation) before deploying.");
+}
+
 app.MapGet("/api/adfs/smart-lockout/{upn}", async (
     string upn,
     IAdfsSmartLockoutService service,
@@ -66,9 +100,11 @@ app.MapGet("/api/adfs/smart-lockout/{upn}", async (
         _ => Results.Problem(statusCode: StatusCodes.Status500InternalServerError)
     };
 })
+.AddEndpointFilter<ApiKeyEndpointFilter>()
 .WithName("GetAdfsSmartLockout")
 .Produces<SmartLockoutApi.Dtos.SmartLockoutResponse>(StatusCodes.Status200OK)
 .ProducesProblem(StatusCodes.Status400BadRequest)
+.ProducesProblem(StatusCodes.Status401Unauthorized)
 .ProducesProblem(StatusCodes.Status404NotFound)
 .ProducesProblem(StatusCodes.Status500InternalServerError);
 

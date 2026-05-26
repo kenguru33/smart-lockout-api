@@ -15,12 +15,16 @@ from non-AD FS hosts without granting broader access.
 
 ## Hard runtime requirement
 
-The process must run on a Windows host where the `ADFS` PowerShell module is
-importable (an AD FS server itself, or an admin host with AD FS RSAT). On any
-other host (including this repo's Linux dev environment) the build still works
-and validation paths still return 400 — but any valid UPN will produce a 500
-with "Get-AdfsAccountActivity is not recognized". Treat that as expected, not
-as a bug to chase.
+In any environment **other than Development**, the process must run on a
+Windows host where the `ADFS` PowerShell module is importable (an AD FS server
+itself, or an admin host with AD FS RSAT). The Development environment uses
+`MockAdfsSmartLockoutService` instead, so the API can be exercised end-to-end
+on Linux/macOS dev machines.
+
+Reserved UPN local-parts in the mock (case-insensitive):
+`locked@*` → 200 with `isLockedOut=true`; `notfound@*` → 404;
+`error@*` → 500; anything else → 200 with a randomized record
+(per-request, so the same UPN can come back locked or clean).
 
 ## Commands
 
@@ -53,10 +57,15 @@ The endpoint in `Program.cs` is intentionally thin. All real work lives behind
 - `Services/SmartLockoutResult.cs` — closed sum type with three cases:
   `Found(response)`, `NotFound(upn)`, `Error(message)`. The service never
   throws for expected outcomes; it returns one of these.
-- `Services/PowerShellAdfsSmartLockoutService.cs` — the only implementation.
+- `Services/PowerShellAdfsSmartLockoutService.cs` — production implementation.
   Registered as a singleton so its cached `InitialSessionState` (with the
   `ADFS` module imported) is reused across requests; each request still gets
-  a fresh `PowerShell` instance.
+  a fresh `PowerShell` instance. Registered only when the host is **not** in
+  the Development environment.
+- `Services/MockAdfsSmartLockoutService.cs` — dev-only stand-in. Registered
+  when `IHostEnvironment.IsDevelopment()` is true. Same `IAdfsSmartLockoutService`
+  contract; returns canned `Found`/`NotFound`/`Error` results steered by the
+  UPN's local-part. Do not add real AD FS calls here.
 - `Validation/UpnValidator.cs` — strict regex + length cap. Source-generated
   regex via `[GeneratedRegex]`.
 - `Dtos/SmartLockoutResponse.cs` — the 200 response shape.
@@ -107,13 +116,26 @@ Constraints to preserve if you touch the publish config:
   `%TEMP%\.net\SmartLockoutApi\<hash>\`. Override with
   `DOTNET_BUNDLE_EXTRACT_BASE_DIR` if `%TEMP%` is locked down on the AD FS server.
 
-## Security TODOs
+## Auth
 
-- `Program.cs` has a `TODO(auth)` next to `MapGet`. There is **no
-  authentication**. Until that is resolved, the API must not be exposed
-  beyond a non-routable interface. Preferred options noted in the comment:
-  Windows Auth (Negotiate/Kerberos) on-prem, or Microsoft.Identity.Web for
-  Entra ID.
-- The app is read-only on purpose. Resetting lockout
-  (`Reset-AdfsAccountLockout`) is deliberately out of scope; do not add
-  state-changing endpoints without revisiting the auth story first.
+API key in `X-API-Key`, validated by `Validation/ApiKeyEndpointFilter.cs`
+against `ApiKey:Keys` from configuration. `FixedTimeEquals` for the
+comparison; the filter is registered as a singleton so the byte-array list
+is parsed once. Missing/wrong key → 401 with `WWW-Authenticate: ApiKey`.
+No keys configured → fail closed (401 on every request, startup warning).
+
+Production keys come from environment variables (`ApiKey__Keys__0`, `__1`
+during rotation), never from tracked config files. `appsettings.Development.json`
+holds a deliberately-public dev key (`dev-only-do-not-use-in-prod`).
+
+Rotation: add the new key as `__1`, restart, switch the consumer over,
+then clear `__0`, restart again. Keys never appear in logs.
+
+TLS is the deployer's responsibility (IIS/proxy in front of Kestrel); the
+filter does not enforce HTTPS.
+
+If the consumer story grows (multiple callers, per-caller identity needed)
+the next step is Windows Auth (Negotiate/Kerberos) or Microsoft.Identity.Web
+for Entra ID. The app is read-only on purpose — resetting lockout
+(`Reset-AdfsAccountLockout`) is deliberately out of scope. Do not add
+state-changing endpoints without revisiting the auth story first.
