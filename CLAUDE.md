@@ -5,12 +5,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A small internal .NET 8 Web API that exposes AD FS Extranet Smart Lockout state
-for a given UPN. There is exactly one endpoint:
+for a given UPN, plus a way to clear it. The endpoints are:
 
-`GET /api/adfs/smart-lockout/{upn}` → wraps `Get-AdfsAccountActivity -Identity <upn>`.
+- `GET  /api/adfs/smart-lockout/{upn}`       → wraps `Get-AdfsAccountActivity -Identity <upn>`.
+- `POST /api/adfs/smart-lockout/{upn}/reset` → wraps `Reset-AdfsAccountLockout -Identity <upn>`. Returns 204 on success. Every attempt is logged at Information with caller IP and target UPN (search logs for `AUDIT reset-lockout`).
 
 It is **not** a general-purpose API. New endpoints should be scrutinized — the
-project's reason for existing is to keep this one PowerShell call accessible
+project's reason for existing is to keep these AD FS PowerShell calls accessible
 from non-AD FS hosts without granting broader access.
 
 ## Hard runtime requirement
@@ -124,6 +125,9 @@ filter does not enforce HTTPS.
 
 If the consumer story grows (multiple callers, per-caller identity needed)
 the next step is Windows Auth (Negotiate/Kerberos) or Microsoft.Identity.Web
-for Entra ID. The app is read-only on purpose — resetting lockout
-(`Reset-AdfsAccountLockout`) is deliberately out of scope. Do not add
-state-changing endpoints without revisiting the auth story first.
+for Entra ID. The reset endpoint is currently gated by the same shared
+`X-API-Key` as the read endpoint, so anyone with the key can clear any
+lockout; audit logging (`AUDIT reset-lockout …`) is the compensating
+control. If a per-caller identity is needed, do not add more state-changing
+endpoints before doing the auth rework — keep the surface area small until
+then.

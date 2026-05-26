@@ -102,4 +102,57 @@ app.MapGet("/api/adfs/smart-lockout/{upn}", async (
 .ProducesProblem(StatusCodes.Status404NotFound)
 .ProducesProblem(StatusCodes.Status500InternalServerError);
 
+// State-changing endpoint. The shared API key is the only thing gating this,
+// so every attempt — accepted or not — is logged at Information with caller
+// IP and target UPN so unlocks remain auditable after the fact.
+app.MapPost("/api/adfs/smart-lockout/{upn}/reset", async (
+    string upn,
+    HttpContext http,
+    IAdfsSmartLockoutService service,
+    ILogger<Program> logger,
+    CancellationToken cancellationToken) =>
+{
+    if (!UpnValidator.TryValidate(upn, out var normalized))
+    {
+        logger.LogWarning("Rejecting invalid UPN input on reset");
+        return Results.Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Invalid UPN",
+            detail: "UPN must be in the form user@domain.tld and contain only allowed characters.");
+    }
+
+    var caller = http.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    logger.LogInformation("AUDIT reset-lockout request: caller {Caller} target {Upn}", caller, normalized);
+
+    var result = await service.ResetAsync(normalized, cancellationToken);
+
+    switch (result)
+    {
+        case ResetLockoutResult.Success:
+            logger.LogInformation("AUDIT reset-lockout success: caller {Caller} target {Upn}", caller, normalized);
+            return Results.NoContent();
+        case ResetLockoutResult.NotFound nf:
+            logger.LogInformation("AUDIT reset-lockout not-found: caller {Caller} target {Upn}", caller, normalized);
+            return Results.Problem(
+                statusCode: StatusCodes.Status404NotFound,
+                title: "No AD FS account activity",
+                detail: $"No Get-AdfsAccountActivity record for '{nf.Upn}'.");
+        case ResetLockoutResult.Error err:
+            logger.LogWarning("AUDIT reset-lockout failed: caller {Caller} target {Upn} error {Error}", caller, normalized, err.Message);
+            return Results.Problem(
+                statusCode: StatusCodes.Status500InternalServerError,
+                title: "AD FS PowerShell call failed",
+                detail: err.Message);
+        default:
+            return Results.Problem(statusCode: StatusCodes.Status500InternalServerError);
+    }
+})
+.AddEndpointFilter<ApiKeyEndpointFilter>()
+.WithName("ResetAdfsSmartLockout")
+.Produces(StatusCodes.Status204NoContent)
+.ProducesProblem(StatusCodes.Status400BadRequest)
+.ProducesProblem(StatusCodes.Status401Unauthorized)
+.ProducesProblem(StatusCodes.Status404NotFound)
+.ProducesProblem(StatusCodes.Status500InternalServerError);
+
 app.Run();

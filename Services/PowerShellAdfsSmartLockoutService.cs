@@ -151,6 +151,56 @@ public sealed class PowerShellAdfsSmartLockoutService : IAdfsSmartLockoutService
         }
     }
 
+    public async Task<ResetLockoutResult> ResetAsync(string upn, CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var ps = PowerShell.Create();
+            ps.Runspace = _runspace;
+
+            // Same trust-boundary rule as GetAsync: typed parameter, never
+            // interpolated into a script string.
+            ps.AddCommand("Reset-AdfsAccountLockout").AddParameter("Identity", upn);
+
+            try
+            {
+                await ps.InvokeAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Reset-AdfsAccountLockout threw for UPN {Upn}", upn);
+                return new ResetLockoutResult.Error($"PowerShell invocation failed: {ex.Message}");
+            }
+
+            if (ps.HadErrors)
+            {
+                var firstError = ps.Streams.Error.FirstOrDefault();
+                var category = firstError?.CategoryInfo?.Category;
+
+                if (category == ErrorCategory.ObjectNotFound)
+                {
+                    _logger.LogInformation("Reset-AdfsAccountLockout: no record for UPN {Upn}", upn);
+                    return new ResetLockoutResult.NotFound(upn);
+                }
+
+                var message = firstError?.ToString() ?? "Unknown PowerShell error";
+                _logger.LogError("Reset-AdfsAccountLockout reported errors for UPN {Upn}: {Message}", upn, message);
+                return new ResetLockoutResult.Error(message);
+            }
+
+            return new ResetLockoutResult.Success(upn);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     public void Dispose()
     {
         _gate.Dispose();
