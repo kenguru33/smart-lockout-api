@@ -1,0 +1,39 @@
+## .NET
+bin/
+obj/
+out/
+*.user
+*.suo
+*.userprefs
+
+## Build artifacts
+*.dll
+*.pdb
+*.exe
+*.cache
+publish/
+
+## IDEs
+.vs/
+.vscode/
+.idea/
+*.swp
+
+## Local secrets / overrides
+appsettings.*.local.json
+*.env
+.env
+secrets.json
+
+## NuGet
+*.nupkg
+.nuget/
+
+## Test results
+TestResults/
+coverage.*
+
+## OS
+.DS_Store
+Thumbs.db
+.~lock.*#
