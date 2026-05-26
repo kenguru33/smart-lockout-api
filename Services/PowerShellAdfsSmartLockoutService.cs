@@ -44,6 +44,26 @@ public sealed class PowerShellAdfsSmartLockoutService : IAdfsSmartLockoutService
 
     private void ImportAdfsModule()
     {
+        // -UseWindowsPowerShell generates a proxy .psm1 and imports it into
+        // this runspace. If the host's execution policy is Restricted/AllSigned
+        // that import is refused. Process-scope Bypass affects only this
+        // .NET process, requires no admin, and does not change machine policy.
+        using (var setPolicy = PowerShell.Create())
+        {
+            setPolicy.Runspace = _runspace;
+            setPolicy.AddCommand("Set-ExecutionPolicy")
+              .AddParameter("Scope", "Process")
+              .AddParameter("ExecutionPolicy", "Bypass")
+              .AddParameter("Force");
+            setPolicy.Invoke();
+            if (setPolicy.HadErrors)
+            {
+                var err = setPolicy.Streams.Error.FirstOrDefault()?.ToString() ?? "Unknown error";
+                throw new InvalidOperationException(
+                    $"Failed to set process-scope execution policy to Bypass: {err}");
+            }
+        }
+
         using var ps = PowerShell.Create();
         ps.Runspace = _runspace;
         ps.AddCommand("Import-Module")
