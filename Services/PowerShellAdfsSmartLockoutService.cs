@@ -153,44 +153,23 @@ public sealed class PowerShellAdfsSmartLockoutService : IAdfsSmartLockoutService
 
     public async Task<ResetLockoutResult> ResetAsync(string upn, CancellationToken cancellationToken)
     {
+        // The ADFS cmdlet's -Location is mandatory and (on the Windows PowerShell
+        // 5.1 ADFS module) does not accept "Both", so we clear each bucket
+        // separately. A NotFound on one bucket is fine if the other cleared —
+        // it just means the user wasn't tracked there. Only when BOTH report
+        // NotFound do we surface NotFound to the caller.
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            using var ps = PowerShell.Create();
-            ps.Runspace = _runspace;
+            var familiar = await InvokeResetAsync(upn, "Familiar", cancellationToken).ConfigureAwait(false);
+            if (familiar is ResetLockoutResult.Error) return familiar;
 
-            // Same trust-boundary rule as GetAsync: typed parameter, never
-            // interpolated into a script string.
-            ps.AddCommand("Reset-AdfsAccountLockout").AddParameter("Identity", upn);
+            var unknown = await InvokeResetAsync(upn, "Unknown", cancellationToken).ConfigureAwait(false);
+            if (unknown is ResetLockoutResult.Error) return unknown;
 
-            try
+            if (familiar is ResetLockoutResult.NotFound && unknown is ResetLockoutResult.NotFound)
             {
-                await ps.InvokeAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Reset-AdfsAccountLockout threw for UPN {Upn}", upn);
-                return new ResetLockoutResult.Error($"PowerShell invocation failed: {ex.Message}");
-            }
-
-            if (ps.HadErrors)
-            {
-                var firstError = ps.Streams.Error.FirstOrDefault();
-                var category = firstError?.CategoryInfo?.Category;
-
-                if (category == ErrorCategory.ObjectNotFound)
-                {
-                    _logger.LogInformation("Reset-AdfsAccountLockout: no record for UPN {Upn}", upn);
-                    return new ResetLockoutResult.NotFound(upn);
-                }
-
-                var message = firstError?.ToString() ?? "Unknown PowerShell error";
-                _logger.LogError("Reset-AdfsAccountLockout reported errors for UPN {Upn}: {Message}", upn, message);
-                return new ResetLockoutResult.Error(message);
+                return new ResetLockoutResult.NotFound(upn);
             }
 
             return new ResetLockoutResult.Success(upn);
@@ -199,6 +178,51 @@ public sealed class PowerShellAdfsSmartLockoutService : IAdfsSmartLockoutService
         {
             _gate.Release();
         }
+    }
+
+    private async Task<ResetLockoutResult> InvokeResetAsync(string upn, string location, CancellationToken cancellationToken)
+    {
+        using var ps = PowerShell.Create();
+        ps.Runspace = _runspace;
+
+        // Same trust-boundary rule as GetAsync: typed parameters, never
+        // interpolated into a script string. `location` is a hard-coded literal
+        // from this file, not caller input.
+        ps.AddCommand("Reset-AdfsAccountLockout")
+          .AddParameter("Identity", upn)
+          .AddParameter("Location", location);
+
+        try
+        {
+            await ps.InvokeAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Reset-AdfsAccountLockout threw for UPN {Upn} location {Location}", upn, location);
+            return new ResetLockoutResult.Error($"PowerShell invocation failed: {ex.Message}");
+        }
+
+        if (ps.HadErrors)
+        {
+            var firstError = ps.Streams.Error.FirstOrDefault();
+            var category = firstError?.CategoryInfo?.Category;
+
+            if (category == ErrorCategory.ObjectNotFound)
+            {
+                _logger.LogInformation("Reset-AdfsAccountLockout: no record for UPN {Upn} location {Location}", upn, location);
+                return new ResetLockoutResult.NotFound(upn);
+            }
+
+            var message = firstError?.ToString() ?? "Unknown PowerShell error";
+            _logger.LogError("Reset-AdfsAccountLockout reported errors for UPN {Upn} location {Location}: {Message}", upn, location, message);
+            return new ResetLockoutResult.Error(message);
+        }
+
+        return new ResetLockoutResult.Success(upn);
     }
 
     public void Dispose()
