@@ -167,8 +167,10 @@ in *Risks & open questions* so it is decided before implementation.
 3. ~~**Clear vs. leave-unchanged semantics:**~~ **Resolved** — `null`/omitted =
    leave unchanged; `""` = clear (`Set-ADUser -Clear`); non-empty = set. Both
    omitted → 400.
-4. ~~**Phone-number validation policy:**~~ **Resolved** — permissive free-form:
-   digits and `+ - ( ) . space`, max 32 chars (`PhoneNumberValidator`).
+4. ~~**Phone-number validation policy:**~~ **Resolved** — must contain 3-15
+   digits (E.164 max; short extensions allowed), optional leading `+`, with
+   `- ( ) . space` permitted for formatting, max 32 chars
+   (`PhoneNumberValidator`). Punctuation-only / digit-less values are rejected.
 5. ~~**PII in logs:**~~ **Resolved** — phone values are never logged; the
    `AUDIT update-ad-phone` line records changed field names only.
 6. **HTTP verb/path:** Confirm `GET` + `PATCH /api/ad/user/{upn}/phone` (vs.
