@@ -114,11 +114,15 @@ in *Risks & open questions* so it is decided before implementation.
   (it would avoid the RSAT module dependency) but **not chosen**, to keep this
   feature consistent with the rest of the codebase.
 - **UPN lookup note:** `Get-ADUser`/`Set-ADUser` do not accept a UPN as
-  `-Identity`. The user is resolved with `-Filter "UserPrincipalName -eq
-  $targetUpn"`, where `$targetUpn` is bound as a runspace variable (not
-  interpolated) so the AD filter engine treats it as data — preserving the
-  typed-parameter trust-boundary rule. The update then targets the resolved
-  `DistinguishedName`.
+  `-Identity`. The user is resolved with
+  `-LDAPFilter "(userPrincipalName=<value>)"`, where the value is LDAP-escaped
+  (RFC 4515). An LDAP filter treats the value as data, not as a PowerShell
+  expression, so there is nothing to inject into — preserving the
+  trust-boundary rule. The update then targets the resolved
+  `DistinguishedName`. (A PowerShell `-Filter` referencing a runspace `$variable`
+  does not work here: the AD module runs in the hidden Windows PowerShell 5.1
+  compat session via `-UseWindowsPowerShell`, and the filter is evaluated in
+  that session where the variable is unset.)
 
 ## Runtime / environment requirements
 

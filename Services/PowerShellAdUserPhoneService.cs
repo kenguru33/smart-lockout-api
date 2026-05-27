@@ -16,15 +16,15 @@ namespace SmartLockoutApi.Services;
 // Runspace processes one pipeline at a time.
 //
 // TRUST BOUNDARY: Get-ADUser/Set-ADUser do NOT accept a UPN as -Identity, so
-// the user is resolved with a -Filter. To keep the typed-parameter rule, the
-// UPN is bound as a runspace variable ($targetUpn) and the filter references
-// that variable — the AD filter engine treats it as data, never as injectable
-// text. The UPN is never interpolated into a string.
+// the user is resolved with -LDAPFilter "(userPrincipalName=<value>)". An LDAP
+// filter treats the value as DATA, not as a PowerShell expression, so there is
+// no script to inject into; the value is additionally LDAP-escaped (RFC 4515)
+// as defence-in-depth on top of UpnValidator. (A PowerShell -Filter with a
+// $variable does not work here: the ActiveDirectory module runs in the hidden
+// Windows PowerShell 5.1 compat session via -UseWindowsPowerShell, and the
+// filter expression is evaluated in that session where the variable is unset.)
 public sealed class PowerShellAdUserPhoneService : IAdUserPhoneService, IDisposable
 {
-    private const string UpnVariable = "targetUpn";
-    private const string UpnFilter = "UserPrincipalName -eq $targetUpn";
-
     private readonly ILogger<PowerShellAdUserPhoneService> _logger;
     private readonly Runspace _runspace;
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -104,10 +104,9 @@ public sealed class PowerShellAdUserPhoneService : IAdUserPhoneService, IDisposa
         {
             using var ps = PowerShell.Create();
             ps.Runspace = _runspace;
-            ps.Runspace.SessionStateProxy.SetVariable(UpnVariable, upn);
 
             ps.AddCommand("Get-ADUser")
-              .AddParameter("Filter", UpnFilter)
+              .AddParameter("LDAPFilter", BuildUpnLdapFilter(upn))
               .AddParameter("Properties", new[] { "MobilePhone", "OfficePhone" });
 
             PSDataCollection<PSObject> results;
@@ -242,8 +241,7 @@ public sealed class PowerShellAdUserPhoneService : IAdUserPhoneService, IDisposa
     {
         using var ps = PowerShell.Create();
         ps.Runspace = _runspace;
-        ps.Runspace.SessionStateProxy.SetVariable(UpnVariable, upn);
-        ps.AddCommand("Get-ADUser").AddParameter("Filter", UpnFilter);
+        ps.AddCommand("Get-ADUser").AddParameter("LDAPFilter", BuildUpnLdapFilter(upn));
 
         PSDataCollection<PSObject> results;
         try
@@ -298,5 +296,29 @@ public sealed class PowerShellAdUserPhoneService : IAdUserPhoneService, IDisposa
     {
         var value = obj.Properties[name]?.Value?.ToString();
         return string.IsNullOrEmpty(value) ? null : value;
+    }
+
+    private static string BuildUpnLdapFilter(string upn) =>
+        $"(userPrincipalName={EscapeLdapFilterValue(upn)})";
+
+    // RFC 4515 §3 escaping for an LDAP filter assertion value. UpnValidator
+    // already forbids these metacharacters; this is defence-in-depth so the
+    // value can never be read as filter syntax. Backslash must be escaped first.
+    private static string EscapeLdapFilterValue(string value)
+    {
+        var sb = new System.Text.StringBuilder(value.Length);
+        foreach (var c in value)
+        {
+            switch (c)
+            {
+                case '\\': sb.Append("\\5c"); break;
+                case '*': sb.Append("\\2a"); break;
+                case '(': sb.Append("\\28"); break;
+                case ')': sb.Append("\\29"); break;
+                case '\0': sb.Append("\\00"); break;
+                default: sb.Append(c); break;
+            }
+        }
+        return sb.ToString();
     }
 }
