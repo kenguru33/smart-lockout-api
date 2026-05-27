@@ -33,6 +33,9 @@ secrets.json
 TestResults/
 coverage.*
 
+## Claude Code (local tooling/state)
+.claude/
+
 ## OS
 .DS_Store
 Thumbs.db
