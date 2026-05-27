@@ -241,7 +241,7 @@ app.MapPatch("/api/ad/user/{upn}/phone", async (
             return Results.Problem(
                 statusCode: StatusCodes.Status400BadRequest,
                 title: "Invalid phone number",
-                detail: "'mobile' may contain only digits and the characters + - ( ) . space, max 32 characters.");
+                detail: "'mobile' must contain 3-15 digits and may use only + - ( ) . space for formatting, max 32 characters.");
         }
         mobile = normMobile;
     }
@@ -253,7 +253,7 @@ app.MapPatch("/api/ad/user/{upn}/phone", async (
             return Results.Problem(
                 statusCode: StatusCodes.Status400BadRequest,
                 title: "Invalid phone number",
-                detail: "'telephoneNumber' may contain only digits and the characters + - ( ) . space, max 32 characters.");
+                detail: "'telephoneNumber' must contain 3-15 digits and may use only + - ( ) . space for formatting, max 32 characters.");
         }
         telephone = normTelephone;
     }
