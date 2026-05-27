@@ -241,7 +241,7 @@ app.MapPatch("/api/ad/user/{upn}/phone", async (
             return Results.Problem(
                 statusCode: StatusCodes.Status400BadRequest,
                 title: "Invalid phone number",
-                detail: "'mobile' must contain 3-15 digits and may use only + - ( ) . space for formatting, max 32 characters.");
+                detail: "'mobile' must be a Norwegian number: 8 digits (first digit 2-9), optionally prefixed with +47 or 0047.");
         }
         mobile = normMobile;
     }
@@ -253,7 +253,7 @@ app.MapPatch("/api/ad/user/{upn}/phone", async (
             return Results.Problem(
                 statusCode: StatusCodes.Status400BadRequest,
                 title: "Invalid phone number",
-                detail: "'telephoneNumber' must contain 3-15 digits and may use only + - ( ) . space for formatting, max 32 characters.");
+                detail: "'telephoneNumber' must be a Norwegian number: 8 digits (first digit 2-9), optionally prefixed with +47 or 0047.");
         }
         telephone = normTelephone;
     }
