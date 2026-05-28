@@ -21,6 +21,7 @@ publish/
 
 ## Local secrets / overrides
 appsettings.*.local.json
+appsettings.Production.json
 *.env
 .env
 secrets.json

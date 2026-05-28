@@ -248,8 +248,31 @@ Get-Service SmartLockoutApi | Format-List Name,Status,StartType,UserName
 
 ## Step 7 — Configure the production environment (on the AD FS server)
 
-Two machine-scope environment variables are required; one must **not** be
-set:
+Configuration comes from two layers:
+
+- **Non-secret** values (Logging levels, `AllowedHosts`, the `Kestrel:Certificate`
+  section) can live in an `appsettings.Production.json` next to the exe.
+  Copy `appsettings.Production.json.example` from the repo (it ships in the
+  `deploy/` folder of the zip) to `<install-path>\appsettings.Production.json`
+  and edit the values.
+
+  ```powershell
+  Copy-Item '<install-path>\deploy\appsettings.Production.json.example' `
+            '<install-path>\appsettings.Production.json'
+  # Then open in notepad / VS Code and set Subject + AllowedHosts to your hostname.
+  ```
+
+  This file is **not** in source control — `appsettings.Production.json` is
+  gitignored so real production values can't leak into the repo. The
+  `.example` template ships alongside it.
+
+- **Secrets** (the API key) come only from machine-scope environment
+  variables. Never put `ApiKey:Keys` in a tracked file.
+
+Set the API key as a machine-scope environment variable. If you did **not**
+use the `appsettings.Production.json` file above, also set the cert subject
+as an env var (env vars and the JSON file are equivalent — pick one per
+value to avoid two sources of truth):
 
 ```powershell
 # Generate an API key
@@ -259,6 +282,9 @@ $apiKey = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replac
 Write-Host "API key (capture now): $apiKey"
 
 [Environment]::SetEnvironmentVariable('ApiKey__Keys__0', $apiKey, 'Machine')
+
+# Only needed if you did NOT set Kestrel:Certificate:Subject in
+# appsettings.Production.json above:
 [Environment]::SetEnvironmentVariable('Kestrel__Certificate__Subject', '<hostname>', 'Machine')
 
 # IMPORTANT: ASPNETCORE_URLS must NOT be set.

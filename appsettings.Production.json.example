@@ -1,0 +1,23 @@
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning",
+      "Microsoft.AspNetCore.HttpsConnectionAdapter": "Warning",
+      "SmartLockoutApi": "Information",
+      "SmartLockoutApi.Services": "Information",
+      "SmartLockoutApi.Tls": "Information"
+    }
+  },
+
+  "AllowedHosts": "api.example.no",
+
+  "Kestrel": {
+    "Certificate": {
+      "Subject": "api.example.no",
+      "StoreName": "My",
+      "StoreLocation": "LocalMachine",
+      "RefreshInterval": "00:05:00"
+    }
+  }
+}

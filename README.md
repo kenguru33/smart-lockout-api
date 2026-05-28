@@ -265,7 +265,9 @@ installs a renewed cert (same subject, new thumbprint), the running process
 swaps to the new cert within the refresh interval — **no restart, no
 in-flight connection drop**. Search logs for `TLS certificate swapped`.
 
-Required configuration (typically as machine environment variables):
+Required configuration (machine environment variables **or**
+`appsettings.Production.json` — see `appsettings.Production.json.example`
+for the file shape; secrets like `ApiKey:Keys` should stay env-var-only):
 
 ```powershell
 [Environment]::SetEnvironmentVariable("Kestrel__Certificate__Subject", "api.example.no", "Machine")
