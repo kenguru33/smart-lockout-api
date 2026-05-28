@@ -14,14 +14,21 @@ using SmartLockoutApi.Validation;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// In production on Windows, mirror the standard console logs into the Windows
-// Event Log so service-mode deployments (where the console is discarded) still
-// have a viewable trail. Source/LogName/levels are read from configuration
-// (Logging:EventLog and Logging:LogLevel). Gated on non-Development so
-// `dotnet run` on a Windows dev box does not spam the Application log.
-if (OperatingSystem.IsWindows() && !builder.Environment.IsDevelopment())
+// Host as a Windows Service when running under the SCM. Without this the
+// process starts but never reports SERVICE_RUNNING, so the SCM kills it
+// after 30 s (Event Viewer: System log, source SCM, EventID 7000 / 7009).
+//
+// UseWindowsService is a no-op when not actually running as a service
+// (interactive dotnet run, Linux, etc.) — IsWindowsService() is checked
+// internally — so it is safe to register unconditionally on Windows. It
+// also registers the EventLog provider for us, using ServiceName as the
+// source, which replaces the explicit AddEventLog() call we had before.
+if (OperatingSystem.IsWindows())
 {
-    builder.Logging.AddEventLog();
+    builder.Host.UseWindowsService(options =>
+    {
+        options.ServiceName = "SmartLockoutApi";
+    });
 }
 
 // HTTPS from the Windows certificate store, with live reload on win-acme /
