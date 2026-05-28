@@ -28,12 +28,17 @@ dotnet build             # build, with TreatWarningsAsErrors=true
 dotnet run               # run; Swagger at /swagger only in Development
 ```
 
-Smoke-test (the 200 path requires running on an AD FS host):
+Smoke-test (the 200 path requires running on an AD FS host). The deployed
+binary on Windows serves HTTPS on 5199 (see *TLS*); curl with `-k` against
+`127.0.0.1` because the cert is for the public subject, not the loopback:
 
 ```
-curl -i http://127.0.0.1:5199/api/adfs/smart-lockout/not-a-upn          # → 400
-curl -i http://127.0.0.1:5199/api/adfs/smart-lockout/user@example.com   # → 500 on non-AD FS host
+curl -ik https://127.0.0.1:5199/api/adfs/smart-lockout/not-a-upn          # → 400
+curl -ik https://127.0.0.1:5199/api/adfs/smart-lockout/user@example.com   # → 500 on non-AD FS host
 ```
+
+On a Linux dev box the cert-store branch is inert; `dotnet run` binds plain
+HTTP via launchSettings (`http://localhost:5140`).
 
 No test project exists yet. If adding one, mock `IAdfsSmartLockoutService` for
 endpoint tests and leave the PowerShell implementation as integration-tested
@@ -120,8 +125,48 @@ holds a deliberately-public dev key (`dev-only-do-not-use-in-prod`).
 Rotation: add the new key as `__1`, restart, switch the consumer over,
 then clear `__0`, restart again. Keys never appear in logs.
 
-TLS is the deployer's responsibility (IIS/proxy in front of Kestrel); the
-filter does not enforce HTTPS.
+## TLS
+
+On Windows, Kestrel terminates HTTPS itself on **port 5199** using a server
+cert loaded from `LocalMachine\My` by subject (CN/SAN). No reverse proxy /
+TLS offloader is in front. Configuration lives at `Kestrel:Certificate`:
+
+```
+Kestrel__Certificate__Subject=api.example.no
+Kestrel__Certificate__StoreName=My                  # default
+Kestrel__Certificate__StoreLocation=LocalMachine    # default
+Kestrel__Certificate__RefreshInterval=00:05:00      # default
+```
+
+`Subject` is the only required field; if it is empty (or the OS is not
+Windows) the entire branch is skipped, so the Linux dev loop is unaffected.
+
+Operator responsibilities, **not** the app's:
+- `win-acme` (or equivalent) installed on the host, configured with a DNS
+  provider plugin + zone API credentials, issuing the cert via **DNS-01**.
+- Renewed cert lands in `LocalMachine\My`; `win-acme`'s scheduled task drives
+  this every ~60 days.
+- Service account has read access to the cert's private key
+  (`certlm.msc` → Manage Private Keys).
+- Do **not** set `ASPNETCORE_URLS` in production — `ConfigureKestrel` binds
+  HTTPS on 5199 explicitly.
+
+Selection rules enforced at startup and on every refresh: subject match
+(SAN DnsName; CN fallback if no SAN), `NotBefore`..`NotAfter` window, has
+`Server Authentication` EKU, has a process-readable private key. When two
+matching valid certs exist (renewal overlap), the one with the **latest
+`NotBefore`** wins. Any startup failure exits non-zero with a clear
+message naming the subject and store.
+
+Live reload: a `ServerCertificateSelector` returns the cached cert; the
+`CertificateRefresher` `IHostedService` re-resolves every
+`RefreshInterval` (default 5 min). When the resolved thumbprint changes,
+the cache is swapped atomically and the next handshake uses the new
+cert — no restart, no in-flight drop. Search logs for
+`TLS certificate swapped`.
+
+Transient store-read errors during refresh log a Warning and keep the
+previous cert in use.
 
 If the consumer story grows (multiple callers, per-caller identity needed)
 the next step is Windows Auth (Negotiate/Kerberos) or Microsoft.Identity.Web
