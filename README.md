@@ -1,22 +1,40 @@
 # SmartLockoutApi
 
-Internal .NET 8 Web API that exposes AD FS Extranet Smart Lockout state for a
-given user. Wraps the `Get-AdfsAccountActivity` PowerShell cmdlet behind one
-HTTP endpoint so helpdesk tools can check lockout status without direct
-PowerShell access to the AD FS server.
+Internal .NET 8 Web API that lets non-AD FS hosts call a small, scrutinized set
+of AD FS and Active Directory PowerShell cmdlets:
 
-```
-GET /api/adfs/smart-lockout/{upn}
-```
+- AD FS Extranet Smart Lockout — read and reset.
+- AD user phone numbers — read and update (`mobile`, `telephoneNumber`).
 
-| Code | When                                                      |
-|------|-----------------------------------------------------------|
-| 200  | Activity record returned                                  |
-| 400  | UPN failed validation (format, length, illegal chars)     |
-| 404  | AD FS has no activity record for the UPN                  |
-| 500  | PowerShell call failed (module missing, AD FS error, etc) |
+The point of the project is to expose **only** those operations, behind an API
+key and TLS, so helpdesk tooling does not need direct PowerShell access to the
+AD FS / domain controllers.
 
-200 response (camelCase JSON):
+## Endpoints
+
+| Method | Path                                   | Effect |
+|--------|----------------------------------------|--------|
+| GET    | `/api/adfs/smart-lockout/{upn}`        | `Get-AdfsAccountActivity -Identity <upn>` |
+| POST   | `/api/adfs/smart-lockout/{upn}/reset`  | `Reset-AdfsAccountLockout -Identity <upn>` (204 on success; AUDIT logged) |
+| GET    | `/api/ad/user/{upn}/phone`             | `Get-ADUser` returning `mobile` + `telephoneNumber` |
+| PATCH  | `/api/ad/user/{upn}/phone`             | `Set-ADUser` — partial update; AUDIT logged |
+
+All endpoints are gated by an `X-API-Key` header (see §4.3). State-changing
+endpoints emit an `AUDIT` log line on every attempt with caller IP, target
+UPN, and what changed.
+
+Status codes (consistent across endpoints):
+
+| Code | When                                                              |
+|------|-------------------------------------------------------------------|
+| 200  | Read endpoint, record returned                                    |
+| 204  | State-changing endpoint succeeded (reset / patch)                 |
+| 400  | UPN failed validation, or PATCH body had no actionable fields, or phone number is not a valid Norwegian number |
+| 401  | Missing / wrong / no-keys-configured API key                      |
+| 404  | No matching AD FS activity record or AD user                      |
+| 500  | PowerShell call failed (module missing, AD unreachable, etc.)     |
+
+Smart-lockout 200 response (camelCase JSON):
 
 ```json
 {
@@ -32,16 +50,33 @@ GET /api/adfs/smart-lockout/{upn}
 }
 ```
 
-`isLockedOut` is `familiarLockout || unknownLockout`.
+Phone read 200 response:
+
+```json
+{ "userPrincipalName": "user@contoso.com", "mobile": "+4791234567", "telephoneNumber": "+4722000000" }
+```
+
+Phone PATCH body — `null`/omitted = leave unchanged, `""` = clear the
+attribute in AD, non-empty = set (must be a Norwegian number, normalized to
+canonical E.164 before storage):
+
+```json
+{ "mobile": "+47 912 34 567", "telephoneNumber": "" }
+```
 
 ---
 
 ## 1. Dev setup
 
-The app builds on Windows, Linux, or macOS, but `GET /api/adfs/smart-lockout`
-only returns a real 200/404 when running on a Windows host with the `ADFS`
-PowerShell module importable (an AD FS server or a host with AD FS RSAT).
-On other hosts the endpoint returns 500 because `Import-Module ADFS` fails.
+The app builds on Windows, Linux, or macOS. The AD FS- and AD-backed paths
+(200/404) only work when running on a Windows host with the relevant
+PowerShell modules importable:
+
+- `ADFS` module (an AD FS server itself) — for the smart-lockout endpoints.
+- `ActiveDirectory` module (AD RSAT or a DC) — for the phone endpoints.
+
+On other hosts those endpoints return 500 because the module import fails.
+The API-key / validation paths still return 401 / 400 correctly anywhere.
 
 Prerequisites:
 
@@ -69,7 +104,8 @@ dotnet build            # → bin/Debug/net8.0/SmartLockoutApi.dll
 dotnet run              # starts Kestrel on the URLs in Properties/launchSettings.json
 ```
 
-Defaults from `launchSettings.json`:
+Defaults from `launchSettings.json` (Development only — production uses
+HTTPS on 5199, see §4.4):
 - HTTP:  `http://localhost:5140`
 - HTTPS: `https://localhost:7228` (uses ASP.NET Core's dev cert)
 - Environment: `Development`
@@ -80,7 +116,7 @@ Swagger UI is enabled in `Development` only:
 http://localhost:5140/swagger
 ```
 
-Smoke-test the auth and validation paths from any host (the AD FS-backed
+Smoke-test the auth and validation paths from any host (the AD-backed
 200/404 paths only work on a real AD FS host — see §4):
 
 ```
@@ -91,7 +127,12 @@ curl -i http://localhost:5140/api/adfs/smart-lockout/not-a-upn
 curl -i -H "X-API-Key: dev-only-do-not-use-in-prod" \
   http://localhost:5140/api/adfs/smart-lockout/not-a-upn
 
-# 500 on non-AD FS hosts (Import-Module ADFS fails); 200/404 on an AD FS host
+# 400 — invalid phone number on PATCH
+curl -i -H "X-API-Key: dev-only-do-not-use-in-prod" -H "Content-Type: application/json" \
+  -X PATCH -d '{"mobile":"+4612345678"}' \
+  http://localhost:5140/api/ad/user/alice@example.com/phone
+
+# 500 on non-AD FS hosts (module import fails); 200/404 on a real AD FS host
 curl -i -H "X-API-Key: dev-only-do-not-use-in-prod" \
   http://localhost:5140/api/adfs/smart-lockout/alice@example.com
 ```
@@ -138,36 +179,37 @@ Notes on the publish profile (configured in `SmartLockoutApi.csproj`):
 - Compression is on (`EnableCompressionInSingleFile=true`); first-run startup
   pays a small decompression cost.
 
+The `deploy/` folder ships with the repo and contains `Setup-ServiceAccount.ps1`
+(see §4.5). It is not part of `publish/`; copy it separately if you want it on
+the target host.
+
 ---
 
 ## 4. Install on the AD FS server
 
-> The API requires an `X-API-Key` header (see §4.3 for key setup). Even so,
-> terminate TLS in front of Kestrel — the key travels in clear text otherwise.
+Because the service uses both the `ADFS` and `ActiveDirectory` PowerShell
+modules, run it on the AD FS server itself. The deploy unit is the `publish/`
+folder; TLS is terminated in-process on **port 5199** using a Let's Encrypt
+certificate from the Windows certificate store (no reverse proxy required).
 
 ### 4.1. Prerequisites on the AD FS server
 
-- Windows Server with the **AD FS** role (or the AD FS RSAT feature on a
-  management host).
-- PowerShell module `ADFS` must be importable. Quick check from an admin
-  PowerShell on the target:
+- Windows Server with the **AD FS** role.
+- PowerShell modules `ADFS` and `ActiveDirectory` must be importable.
+  Quick check from an admin PowerShell on the target:
 
   ```powershell
-  Import-Module ADFS
-  Get-Command Get-AdfsAccountActivity
+  Import-Module ADFS;            Get-Command Get-AdfsAccountActivity
+  Import-Module ActiveDirectory; Get-Command Get-ADUser
   ```
 
-  If both succeed, the host is suitable.
-
-- Extranet Smart Lockout must already be enabled in your farm
-  (`Set-AdfsProperties -EnableExtranetLockout $true`). Without it,
-  `Get-AdfsAccountActivity` still returns a record, but the lockout fields
-  will always read `False`.
-
-- The account that runs the API process must have rights to call
-  `Get-AdfsAccountActivity`. Members of the **AD FS Administrators** group
-  (or local Administrators on a single-server farm) have this. Service
-  accounts without those rights will get 500s with an access-denied PS error.
+- Extranet Smart Lockout enabled in the farm
+  (`Set-AdfsProperties -EnableExtranetLockout $true`).
+- `win-acme` (or equivalent) installed and configured with a **DNS provider
+  plugin** + zone API credentials. Issuance and renewal use **DNS-01**, so
+  the AD FS host does **not** need inbound port-80 reachability.
+- A service account in AD that will run the API process (see §4.5 for the
+  permissions it needs — the included PowerShell script grants them).
 
 ### 4.2. Copy the files
 
@@ -185,119 +227,156 @@ C:\Program Files\SmartLockoutApi\
 
 ### 4.3. Configure the API key
 
-Production keys come from environment variables, never from
-`appsettings.json` (which is tracked in git). `ApiKey:Keys` is read as a
-.NET configuration array, so the keys live at `ApiKey__Keys__0`,
-`ApiKey__Keys__1`, etc. — index `__1` is only used during rotation.
+Production keys come from environment variables, never from tracked config
+files. `ApiKey:Keys` is read as a .NET configuration array, so the keys
+live at `ApiKey__Keys__0`, `ApiKey__Keys__1`, etc. — `__1` is only used
+during rotation.
 
-Generate a key (any high-entropy string works; this is one option):
+Generate a key (any high-entropy string works):
 
 ```powershell
-# 32 random bytes, base64url-encoded
 $bytes = New-Object byte[] 32
 [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
 [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
 ```
 
-Set it machine-wide so the Windows Service inherits it:
+Set it machine-wide so the service inherits it:
 
 ```powershell
 [Environment]::SetEnvironmentVariable("ApiKey__Keys__0", "<paste-key-here>", "Machine")
 ```
 
-If no key is configured, every request returns `401` and the app logs a
-warning at startup — the API fails closed.
+If no key is configured the API fails closed (401 on every request, plus
+a startup warning).
 
-**Rotation** (zero-downtime): set `ApiKey__Keys__1` to a new key, restart
-the service, switch the consumer over, then clear `ApiKey__Keys__0` and
-restart again.
+**Rotation** (zero-downtime): set `ApiKey__Keys__1` to a new key, restart,
+switch the consumer over, then clear `ApiKey__Keys__0` and restart again.
 
-```powershell
-[Environment]::SetEnvironmentVariable("ApiKey__Keys__1", "<new-key>", "Machine")
-Restart-Service SmartLockoutApi
-# … point consumer at the new key, verify it works …
-[Environment]::SetEnvironmentVariable("ApiKey__Keys__0", $null, "Machine")
-Restart-Service SmartLockoutApi
-```
+### 4.4. Configure TLS (Kestrel + Windows cert store + Let's Encrypt)
 
-### 4.4. Quick run (interactive, for the first test)
+The API terminates TLS itself on **port 5199** using a certificate from
+`LocalMachine\My`, selected by **subject** (CN/SAN DnsName). When `win-acme`
+installs a renewed cert (same subject, new thumbprint), the running process
+swaps to the new cert within the refresh interval — **no restart, no
+in-flight connection drop**. Search logs for `TLS certificate swapped`.
 
-Open an **elevated** PowerShell window on the AD FS server (or sign in with
-an AD FS Admin account) and run:
+Required configuration (typically as machine environment variables):
 
 ```powershell
-cd "C:\Program Files\SmartLockoutApi"
-.\SmartLockoutApi.exe --urls http://localhost:5000
+[Environment]::SetEnvironmentVariable("Kestrel__Certificate__Subject", "api.example.no", "Machine")
+# Defaults — set only if non-default:
+# Kestrel__Certificate__StoreName       = "My"
+# Kestrel__Certificate__StoreLocation   = "LocalMachine"
+# Kestrel__Certificate__RefreshInterval = "00:05:00"
 ```
 
-First run extracts native libraries to `%TEMP%\.net\SmartLockoutApi\<hash>\`.
-If `%TEMP%` is locked down or AV blocks executables out of temp, point the
-extractor at a writable directory before launching:
+**Do NOT** set `ASPNETCORE_URLS` in production. The app binds HTTPS on 5199
+explicitly via `ConfigureKestrel`; setting `ASPNETCORE_URLS` will add an
+extra (likely plain-HTTP) listener.
+
+The cert-store branch is gated on Windows + a non-empty `Subject`, so on a
+Linux dev box it stays inert and `dotnet run` keeps its launchSettings HTTP
+binding.
+
+Startup will fail fast with a clear message if the cert is missing, expired,
+not yet valid, missing the `Server Authentication` EKU, or its private key
+is not readable by the service account. Transient store-read failures
+during a later refresh log a Warning and keep the previous cert in use.
+
+For the full TLS design, see `_specs/server-tls-cert-from-windows-store.md`.
+
+### 4.5. Service account: required permissions
+
+The service account needs five things; the included
+`deploy/Setup-ServiceAccount.ps1` configures them idempotently:
+
+| Permission                                                     | Why |
+|----------------------------------------------------------------|-----|
+| `SeServiceLogonRight` ("Log on as a service")                  | SCM can start the process as the account. |
+| Local Administrators on the AD FS server                       | Required by `Get-AdfsAccountActivity` / `Reset-AdfsAccountLockout`. |
+| Read on the TLS cert's private-key file in `LocalMachine\My`   | Kestrel can read the LE key to serve HTTPS. |
+| Inbound TCP 5199 (Windows Firewall, Domain profile)            | Callers can reach the listener. |
+| `RPWP` on `mobile` + `telephoneNumber` for users in the target OU | `Set-ADUser -MobilePhone`/`-OfficePhone` works **without** Domain Admin / Account Operators. |
+
+Run the script from an elevated PowerShell on the AD FS server:
 
 ```powershell
-$env:DOTNET_BUNDLE_EXTRACT_BASE_DIR = "C:\ProgramData\SmartLockoutApi\bundle"
-.\SmartLockoutApi.exe --urls http://localhost:5000
+.\deploy\Setup-ServiceAccount.ps1 `
+    -ServiceAccount 'EXAMPLE\svc-smartlockout' `
+    -CertSubject 'api.example.no' `
+    -UserOU 'OU=Users,DC=example,DC=com' `
+    -BinaryPath 'C:\Program Files\SmartLockoutApi\SmartLockoutApi.exe' `
+    -InstallService
 ```
 
-From another shell on the **same machine**, verify (substitute your key):
+Re-running the script is safe; each step detects whether it has already been
+done and skips. `-InstallService` is optional — omit it to install the
+Windows service manually (§4.6).
 
-```powershell
-curl -H "X-API-Key: <your-key>" http://localhost:5000/api/adfs/smart-lockout/realuser@contoso.com
-```
+### 4.6. Install as a Windows Service (manual alternative)
 
-Expect a 200 with the activity record, or 404 if AD FS has never seen that
-UPN. A 401 means the key didn't match. A 500 with "module not found" means
-the host doesn't have the ADFS PS module; "Access is denied" means the
-runtime account lacks AD FS admin rights.
-
-### 4.5. Install as a Windows Service (recommended for production)
-
-The exe runs as a regular console process today. The `Program.cs` does not
-yet call `UseWindowsService()`, so service stop/start signals are handled by
-the default console host — sufficient for an internal lookup API, but not
-ideal long-term (see the follow-up note below).
-
-Register it as a service from an elevated PowerShell:
+If you skipped `-InstallService` in §4.5:
 
 ```powershell
 $exe = "C:\Program Files\SmartLockoutApi\SmartLockoutApi.exe"
 
-New-Service -Name "SmartLockoutApi" `
-            -BinaryPathName "`"$exe`" --urls http://localhost:5000" `
-            -DisplayName "AD FS Smart Lockout API" `
-            -Description "Internal API wrapping Get-AdfsAccountActivity." `
-            -StartupType Automatic
-
-# Run under an AD FS Administrator service account, not LocalSystem:
-sc.exe config SmartLockoutApi obj= "DOMAIN\svc-smartlockout" password= "********"
+New-Service -Name 'SmartLockoutApi' `
+            -BinaryPathName "`"$exe`"" `
+            -DisplayName 'AD FS Smart Lockout API' `
+            -Description 'Internal API: AD FS smart lockout + AD phone-number management.' `
+            -StartupType Automatic `
+            -Credential (Get-Credential -UserName 'EXAMPLE\svc-smartlockout' -Message 'Service account password')
 
 Start-Service SmartLockoutApi
 Get-Service  SmartLockoutApi
 ```
 
-Validate again with the same `curl` as in 4.4.
+Validate:
 
-**Follow-up** (out of scope here, recommended before any real production use):
-add the `Microsoft.Extensions.Hosting.WindowsServices` package and call
-`builder.Host.UseWindowsService()` in `Program.cs`. That makes the process a
-first-class Windows Service with proper stop-signal handling.
+```powershell
+curl -ik -H "X-API-Key: <your-key>" `
+    https://127.0.0.1:5199/api/adfs/smart-lockout/realuser@contoso.com
+```
 
-### 4.6. Logs
+`-k` because the LE cert is for the public subject, not the loopback. Expect
+200 with the activity record, 404 if AD FS has never seen the UPN, 401 if the
+key is wrong, or 500 with "Access is denied" if the service account lacks AD
+FS admin rights.
+
+First run extracts native libs to `%TEMP%\.net\SmartLockoutApi\<hash>\`. If
+`%TEMP%` is locked down, point the extractor elsewhere via a machine env var:
+
+```powershell
+[Environment]::SetEnvironmentVariable("DOTNET_BUNDLE_EXTRACT_BASE_DIR", `
+  "C:\ProgramData\SmartLockoutApi\bundle", "Machine")
+```
+
+### 4.7. Logs
 
 The app logs to stdout via the default ASP.NET Core console logger. When
-running as a Windows Service the console output is discarded; for service
-deployments wire up file logging (Serilog, NLog) or write to the Windows
-Event Log before relying on it. Until then, run interactively when
-diagnosing failures.
+running as a Windows Service the console output is discarded; wire up file
+logging (Serilog, NLog) or write to the Windows Event Log before relying
+on logs from a service-mode deployment.
 
-### 4.7. Uninstall
+State-changing endpoints emit greppable audit lines:
+
+- `AUDIT reset-lockout` — smart-lockout reset attempts.
+- `AUDIT update-ad-phone` — phone-number updates (field names only, never values).
+- `TLS certificate swapped` — live cert reload after `win-acme` renewal.
+
+### 4.8. Uninstall
 
 ```powershell
 Stop-Service SmartLockoutApi
 sc.exe delete SmartLockoutApi
 Remove-Item "C:\Program Files\SmartLockoutApi" -Recurse -Force
-Remove-Item "C:\ProgramData\SmartLockoutApi" -Recurse -Force  # if you set DOTNET_BUNDLE_EXTRACT_BASE_DIR
+Remove-Item "C:\ProgramData\SmartLockoutApi" -Recurse -Force  # if DOTNET_BUNDLE_EXTRACT_BASE_DIR was set
 ```
+
+The Windows Firewall rule, the AD delegation, the cert ACL, and the local
+Administrators membership are **not** removed automatically — clean those
+up with `Remove-NetFirewallRule`, `dsacls /R`, `certlm.msc`, and
+`Remove-LocalGroupMember` as required.
 
 ---
 
@@ -309,15 +388,22 @@ Remove-Item "C:\ProgramData\SmartLockoutApi" -Recurse -Force  # if you set DOTNE
   return `401` with `WWW-Authenticate: ApiKey`. When no keys are configured
   the app fails closed (401 on every request, plus a startup warning).
   Keys never appear in logs.
-- **TLS is the deployer's job.** Terminate HTTPS in front of Kestrel (IIS,
-  a reverse proxy, or `app.UseHttpsRedirection()` with a real cert) before
-  exposing the API to anything but loopback — otherwise the key travels in
-  clear text.
-- UPN input is validated against a strict regex and length cap. The
-  PowerShell call passes the UPN as a typed parameter
-  (`.AddParameter("Identity", upn)`), never concatenated into a script — the
-  SDK's parameter binding is the primary defense against command injection;
-  the regex is defense-in-depth.
-- The API is read-only. There is no endpoint to reset a lockout
-  (`Reset-AdfsAccountLockout`) — that would need a stronger auth story
-  (Windows Auth or Entra ID) first.
+- **TLS** is terminated in-process by Kestrel on port 5199 using a Let's
+  Encrypt cert from the Windows certificate store. The cert is rotated by
+  `win-acme` and picked up live by the API — see §4.4 and the spec at
+  `_specs/server-tls-cert-from-windows-store.md`. TLS protocol floor is
+  **1.2** (1.3 preferred when supported); older protocols are refused.
+- UPN input is validated against a strict regex and length cap. PowerShell
+  calls pass user input as typed parameters
+  (`.AddParameter("Identity", upn)`) or via an LDAP filter with an LDAP-
+  escaped value; nothing is interpolated into a script string. Validators
+  are defense-in-depth.
+- Phone numbers must be valid Norwegian numbers (8 national digits, optional
+  `+47` / `0047` prefix), normalized to canonical E.164 (`+47XXXXXXXX`)
+  before being written to AD.
+- State-changing endpoints (`POST /reset`, `PATCH /phone`) are gated by the
+  same shared API key as the read endpoints. The accepted compensating
+  control is audit logging (`AUDIT reset-lockout`, `AUDIT update-ad-phone`).
+  If/when a per-caller identity becomes necessary, the next step is Windows
+  Auth (Negotiate/Kerberos) or Microsoft.Identity.Web for Entra ID — keep
+  the surface area small until then.
