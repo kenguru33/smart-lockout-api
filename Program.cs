@@ -6,11 +6,50 @@
 // Auth: X-API-Key header, validated by ApiKeyEndpointFilter against
 // ApiKey:Keys from configuration. TLS is the deployer's responsibility.
 
+using System.Security.Authentication;
 using Microsoft.OpenApi.Models;
 using SmartLockoutApi.Services;
+using SmartLockoutApi.Tls;
 using SmartLockoutApi.Validation;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// HTTPS from the Windows certificate store, with live reload on win-acme /
+// Let's Encrypt renewal. Active only when the host is Windows AND a Subject
+// is configured — on Linux dev boxes (no Windows store) Kestrel falls back to
+// its launchSettings-driven HTTP binding so `dotnet run` still works.
+builder.Services.Configure<CertificateOptions>(
+    builder.Configuration.GetSection(CertificateOptions.SectionName));
+
+var certOptions = builder.Configuration
+    .GetSection(CertificateOptions.SectionName)
+    .Get<CertificateOptions>() ?? new CertificateOptions();
+var useWindowsCertStoreTls = OperatingSystem.IsWindows()
+    && !string.IsNullOrWhiteSpace(certOptions.Subject);
+
+if (useWindowsCertStoreTls)
+{
+    builder.Services.AddSingleton<IServerCertificateProvider, WindowsStoreCertificateProvider>();
+    builder.Services.AddHostedService<CertificateRefresher>();
+
+    // Bind HTTPS explicitly on 5199. The ServerCertificateSelector is called
+    // per TLS handshake, returning whatever cert the provider currently has
+    // cached — this is what makes the live swap on renewal work.
+    builder.WebHost.ConfigureKestrel(options =>
+    {
+        options.ListenAnyIP(5199, listen =>
+        {
+            listen.UseHttps(https =>
+            {
+                https.SslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13;
+                https.ServerCertificateSelector = (_, _) =>
+                    options.ApplicationServices
+                        .GetRequiredService<IServerCertificateProvider>()
+                        .Current;
+            });
+        });
+    });
+}
 
 // The PowerShell singleton opens a long-lived Runspace at construction and
 // imports the ADFS module via -UseWindowsPowerShell into it; each request
@@ -51,6 +90,13 @@ var app = builder.Build();
 // stops startup instead of becoming a 500 on the first request.
 app.Services.GetRequiredService<IAdfsSmartLockoutService>();
 app.Services.GetRequiredService<IAdUserPhoneService>();
+
+// Same idea for the TLS cert provider: resolve it now so a missing / expired /
+// no-private-key cert stops startup instead of failing the first TLS handshake.
+if (useWindowsCertStoreTls)
+{
+    app.Services.GetRequiredService<IServerCertificateProvider>();
+}
 
 if (app.Environment.IsDevelopment())
 {
