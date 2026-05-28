@@ -66,6 +66,121 @@ canonical E.164 before storage):
 
 ---
 
+## Examples (curl)
+
+Capture these once so the snippets stay readable. From the production AD FS
+host these run against `https://<hostname>:5199`; for loopback testing on
+that host, swap to `https://127.0.0.1:5199` and add `-k` (the LE cert is
+issued for `<hostname>`, not the loopback).
+
+```bash
+# bash / zsh
+HOST=api.example.no
+KEY='<api-key>'
+UPN=alice@example.com
+```
+
+```powershell
+# PowerShell
+$HOST = 'api.example.no'
+$KEY  = '<api-key>'
+$UPN  = 'alice@example.com'
+```
+
+### Read AD FS smart-lockout state
+
+```bash
+curl -s -H "X-API-Key: $KEY" https://$HOST:5199/api/adfs/smart-lockout/$UPN
+```
+
+```json
+{
+  "userPrincipalName": "alice@example.com",
+  "isLockedOut": false,
+  "familiarLockout": false,
+  "unknownLockout": false,
+  "badPwdCountFamiliar": 0,
+  "badPwdCountUnknown": 0,
+  "lastFailedAuthFamiliar": null,
+  "lastFailedAuthUnknown": null,
+  "familiarIps": []
+}
+```
+
+### Reset a smart-lockout
+
+```bash
+curl -i -X POST -H "X-API-Key: $KEY" \
+  https://$HOST:5199/api/adfs/smart-lockout/$UPN/reset
+```
+
+Expect `HTTP/1.1 204 No Content`. An `AUDIT reset-lockout` line is written
+to the Event Log on every attempt.
+
+### Read phone numbers
+
+```bash
+curl -s -H "X-API-Key: $KEY" https://$HOST:5199/api/ad/user/$UPN/phone
+```
+
+```json
+{ "userPrincipalName": "alice@example.com", "mobile": "+4791234567", "telephoneNumber": "+4722000000" }
+```
+
+`null` for either field means the attribute is unset in AD.
+
+### Set the mobile number, leave the office number unchanged
+
+```bash
+curl -i -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"mobile":"+47 912 34 567"}' \
+  https://$HOST:5199/api/ad/user/$UPN/phone
+```
+
+Expect 204. The submitted `+47 912 34 567` is normalized to `+4791234567`
+in AD.
+
+### Clear the office number
+
+```bash
+curl -i -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"telephoneNumber":""}' \
+  https://$HOST:5199/api/ad/user/$UPN/phone
+```
+
+### Set both fields at once
+
+```bash
+curl -i -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"mobile":"+4791234567","telephoneNumber":"+4722000000"}' \
+  https://$HOST:5199/api/ad/user/$UPN/phone
+```
+
+### Error paths (no AD round-trip needed)
+
+```bash
+# 401 — missing API key
+curl -i https://$HOST:5199/api/adfs/smart-lockout/$UPN
+
+# 400 — invalid UPN format
+curl -i -H "X-API-Key: $KEY" https://$HOST:5199/api/adfs/smart-lockout/not-a-upn
+
+# 400 — phone not a valid Norwegian number
+curl -i -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"mobile":"+4612345678"}' \
+  https://$HOST:5199/api/ad/user/$UPN/phone
+
+# 400 — PATCH body has no actionable fields
+curl -i -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{}' \
+  https://$HOST:5199/api/ad/user/$UPN/phone
+
+# 404 — UPN does not exist in AD
+curl -i -H "X-API-Key: $KEY" https://$HOST:5199/api/ad/user/nobody@example.com/phone
+```
+
+---
+
 ## 1. Dev setup
 
 The app builds on Windows, Linux, or macOS. The AD FS- and AD-backed paths
