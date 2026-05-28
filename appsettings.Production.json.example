@@ -7,6 +7,10 @@
       "SmartLockoutApi": "Information",
       "SmartLockoutApi.Services": "Information",
       "SmartLockoutApi.Tls": "Information"
+    },
+    "EventLog": {
+      "SourceName": "SmartLockoutApi",
+      "LogName": "Application"
     }
   },
 

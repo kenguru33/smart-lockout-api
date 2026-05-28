@@ -294,16 +294,17 @@ For the full TLS design, see `_specs/server-tls-cert-from-windows-store.md`.
 
 ### 4.5. Service account: required permissions
 
-The service account needs five things; the included
+The service account needs six things; the included
 `deploy/Setup-ServiceAccount.ps1` configures them idempotently:
 
-| Permission                                                     | Why |
+| Permission / setup                                             | Why |
 |----------------------------------------------------------------|-----|
 | `SeServiceLogonRight` ("Log on as a service")                  | SCM can start the process as the account. |
 | Local Administrators on the AD FS server                       | Required by `Get-AdfsAccountActivity` / `Reset-AdfsAccountLockout`. |
 | Read on the TLS cert's private-key file in `LocalMachine\My`   | Kestrel can read the LE key to serve HTTPS. |
 | Inbound TCP 5199 (Windows Firewall, Domain profile)            | Callers can reach the listener. |
 | `RPWP` on `mobile` + `telephoneNumber` for users in the target OU | `Set-ADUser -MobilePhone`/`-OfficePhone` works **without** Domain Admin / Account Operators. |
+| Event Log source `SmartLockoutApi` registered in the Application log | The service can write to the Event Log without admin rights at runtime. |
 
 Run the script from an elevated PowerShell on the AD FS server:
 
@@ -360,10 +361,21 @@ First run extracts native libs to `%TEMP%\.net\SmartLockoutApi\<hash>\`. If
 
 ### 4.7. Logs
 
-The app logs to stdout via the default ASP.NET Core console logger. When
-running as a Windows Service the console output is discarded; wire up file
-logging (Serilog, NLog) or write to the Windows Event Log before relying
-on logs from a service-mode deployment.
+In production on Windows (non-Development environment) the app writes
+logs to the **Windows Event Log** under source `SmartLockoutApi` in the
+Application log, in addition to stdout. The event source is registered
+once by the setup script (§4.5); the service account does not need to
+self-register at runtime. View with Event Viewer or `Get-WinEvent`:
+
+```powershell
+Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'SmartLockoutApi' } -MaxEvents 50 |
+    Select-Object TimeCreated, LevelDisplayName, Message
+```
+
+When running interactively (`dotnet run` on a dev box, or
+`SmartLockoutApi.exe` from a console) the EventLog provider is **not**
+loaded — Development is excluded from the provider gate, and stdout is
+the only sink.
 
 State-changing endpoints emit greppable audit lines:
 

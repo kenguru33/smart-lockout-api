@@ -225,7 +225,8 @@ cd '<install-path>'
 ```
 
 The script is idempotent. Each step prints `Already granted/added/exists.
-Skipping.` when re-run. The five things it does and why each matters are
+Skipping.` when re-run. The six things it does (five permissions plus
+registering the Windows Event Log source) and why each matters are
 listed in the README §4.5 and in the script header.
 
 If the **dsacls step fails** because `dsacls.exe` isn't on the AD FS
@@ -365,10 +366,19 @@ Force a renewal once, while the service is running, to prove the wiring:
 & 'C:\Tools\win-acme\wacs.exe' --renew --force
 ```
 
-Within `RefreshInterval` (default 5 minutes) the service log should emit:
+Within `RefreshInterval` (default 5 minutes) the service log (Event Viewer
+→ Application → source `SmartLockoutApi`) should emit:
 
 ```
 TLS certificate swapped: old <oldThumbprint> -> new <newThumbprint>, subject '<hostname>', NotAfter <date>
+```
+
+```powershell
+Get-WinEvent -FilterHashtable @{
+    LogName = 'Application'; ProviderName = 'SmartLockoutApi'
+} -MaxEvents 20 |
+    Where-Object { $_.Message -match 'TLS certificate swapped' } |
+    Select-Object TimeCreated, Message
 ```
 
 Confirm new connections use the new cert:
@@ -412,7 +422,9 @@ Run the exe interactively (Step 8) to see the startup error. Common causes:
 
 ### 500 from an endpoint that previously worked
 
-Search the service log for `AUDIT` / `Failed` / `Access is denied`:
+Search the Event Log (Event Viewer → Application → source
+`SmartLockoutApi`, or via `Get-WinEvent`) for `AUDIT` / `Failed` /
+`Access is denied`:
 
 | Error from cmdlet                       | Meaning                                                          | Fix |
 |-----------------------------------------|------------------------------------------------------------------|-----|
