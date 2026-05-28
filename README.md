@@ -187,6 +187,11 @@ the target host.
 
 ## 4. Install on the AD FS server
 
+> **Full step-by-step guide:** [`deploy/DEPLOY.md`](deploy/DEPLOY.md).
+> The sections below summarise the moving parts; the guide is the canonical,
+> command-by-command walk-through (DNS prerequisites, win-acme issuance,
+> service-account setup, smoke tests, troubleshooting).
+
 Because the service uses both the `ADFS` and `ActiveDirectory` PowerShell
 modules, run it on the AD FS server itself. The deploy unit is the `publish/`
 folder; TLS is terminated in-process on **port 5199** using a Let's Encrypt
