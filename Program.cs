@@ -14,6 +14,16 @@ using SmartLockoutApi.Validation;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// In production on Windows, mirror the standard console logs into the Windows
+// Event Log so service-mode deployments (where the console is discarded) still
+// have a viewable trail. Source/LogName/levels are read from configuration
+// (Logging:EventLog and Logging:LogLevel). Gated on non-Development so
+// `dotnet run` on a Windows dev box does not spam the Application log.
+if (OperatingSystem.IsWindows() && !builder.Environment.IsDevelopment())
+{
+    builder.Logging.AddEventLog();
+}
+
 // HTTPS from the Windows certificate store, with live reload on win-acme /
 // Let's Encrypt renewal. Active only when the host is Windows AND a Subject
 // is configured — on Linux dev boxes (no Windows store) Kestrel falls back to

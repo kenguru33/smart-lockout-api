@@ -17,6 +17,10 @@
       5. Delegate write on 'mobile' and 'telephoneNumber' on the target OU,
          so Set-ADUser can update those attributes WITHOUT making the
          account Account Operators or Domain Admin.
+      6. Register the Windows Event Log source 'SmartLockoutApi' so the
+         service (running as a non-admin account) can write Information /
+         Warning / Error events into the Application log without needing
+         to self-register at runtime.
 
     Optional:
       - Install the Windows service (-InstallService -BinaryPath ...).
@@ -91,7 +95,7 @@ function Get-AccountSid {
 # ---------------------------------------------------------------------------
 function Grant-LogonAsService {
     param([string]$Account)
-    Write-Host "[1/5] Granting 'Log on as a service' to $Account..." -ForegroundColor Cyan
+    Write-Host "[1/6] Granting 'Log on as a service' to $Account..." -ForegroundColor Cyan
 
     $sid = Get-AccountSid -Account $Account
     $tempBase = [System.IO.Path]::GetTempPath()
@@ -129,7 +133,7 @@ function Grant-LogonAsService {
 # ---------------------------------------------------------------------------
 function Add-AdfsAdminMembership {
     param([string]$Account)
-    Write-Host "[2/5] Adding $Account to local Administrators (required for AD FS cmdlets)..." -ForegroundColor Cyan
+    Write-Host "[2/6] Adding $Account to local Administrators (required for AD FS cmdlets)..." -ForegroundColor Cyan
 
     $alreadyMember = $false
     try {
@@ -157,7 +161,7 @@ function Add-AdfsAdminMembership {
 # ---------------------------------------------------------------------------
 function Grant-CertPrivateKeyRead {
     param([string]$Account, [string]$Subject)
-    Write-Host "[3/5] Granting $Account read access to the private key of '$Subject'..." -ForegroundColor Cyan
+    Write-Host "[3/6] Granting $Account read access to the private key of '$Subject'..." -ForegroundColor Cyan
 
     $now = Get-Date
     $cert = Get-ChildItem Cert:\LocalMachine\My |
@@ -219,7 +223,7 @@ function Grant-CertPrivateKeyRead {
 # ---------------------------------------------------------------------------
 function New-HttpsFirewallRule {
     param([int]$Port)
-    Write-Host "[4/5] Opening inbound TCP $Port in Windows Firewall..." -ForegroundColor Cyan
+    Write-Host "[4/6] Opening inbound TCP $Port in Windows Firewall..." -ForegroundColor Cyan
     $name = "SmartLockoutApi HTTPS $Port"
 
     if (Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue) {
@@ -238,7 +242,7 @@ function New-HttpsFirewallRule {
 # ---------------------------------------------------------------------------
 function Grant-AdAttributeDelegation {
     param([string]$Account, [string]$Ou)
-    Write-Host "[5/5] Delegating write on 'mobile','telephoneNumber' inside $Ou..." -ForegroundColor Cyan
+    Write-Host "[5/6] Delegating write on 'mobile','telephoneNumber' inside $Ou..." -ForegroundColor Cyan
 
     $dsacls = Get-Command dsacls.exe -ErrorAction SilentlyContinue
     if (-not $dsacls) {
@@ -253,6 +257,28 @@ function Grant-AdAttributeDelegation {
     & dsacls.exe $Ou /I:S /G "${Account}:RPWP;mobile;user"          | Out-Null
     & dsacls.exe $Ou /I:S /G "${Account}:RPWP;telephoneNumber;user" | Out-Null
     Write-Host "  Delegated." -ForegroundColor Green
+}
+
+# ---------------------------------------------------------------------------
+# 6. Windows Event Log source. The service runs as a non-admin account and
+#    cannot self-register; do it here while we have admin rights. The .NET
+#    EventLog provider uses this source when writing into the Application log.
+# ---------------------------------------------------------------------------
+function Register-EventLogSource {
+    param([string]$Source = 'SmartLockoutApi', [string]$LogName = 'Application')
+    Write-Host "[6/6] Registering Event Log source '$Source' in '$LogName'..." -ForegroundColor Cyan
+
+    if ([System.Diagnostics.EventLog]::SourceExists($Source)) {
+        $existingLog = [System.Diagnostics.EventLog]::LogNameFromSourceName($Source, '.')
+        if ($existingLog -eq $LogName) {
+            Write-Host "  Source already registered in '$LogName'. Skipping." -ForegroundColor Yellow
+            return
+        }
+        throw "Source '$Source' is already registered in event log '$existingLog', not '$LogName'. Resolve manually with Remove-EventLog -Source $Source."
+    }
+
+    New-EventLog -LogName $LogName -Source $Source
+    Write-Host "  Registered." -ForegroundColor Green
 }
 
 # ---------------------------------------------------------------------------
@@ -290,6 +316,7 @@ Add-AdfsAdminMembership  -Account $ServiceAccount
 Grant-CertPrivateKeyRead -Account $ServiceAccount -Subject $CertSubject
 New-HttpsFirewallRule    -Port    $Port
 Grant-AdAttributeDelegation -Account $ServiceAccount -Ou $UserOU
+Register-EventLogSource
 
 if ($InstallService) {
     if (-not $BinaryPath) { throw "-InstallService requires -BinaryPath." }
