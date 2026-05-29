@@ -87,28 +87,36 @@ builder.Services.AddSingleton<ApiKeyEndpointFilter>();
 builder.Services.AddHealthChecks()
     .AddCheck("self", () => HealthCheckResult.Healthy(), tags: new[] { "live" });
 
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen(options =>
+// Swagger / OpenAPI is config-driven: on when Swagger:Enabled=true, off
+// otherwise. Default is off (GetValue<bool> returns false for a missing key).
+// appsettings.Development.json sets it to true so the dev loop is unchanged.
+var swaggerEnabled = builder.Configuration.GetValue<bool>("Swagger:Enabled");
+
+if (swaggerEnabled)
 {
-    options.AddSecurityDefinition("ApiKey", new OpenApiSecurityScheme
+    builder.Services.AddEndpointsApiExplorer();
+    builder.Services.AddSwaggerGen(options =>
     {
-        Name = ApiKeyEndpointFilter.HeaderName,
-        In = ParameterLocation.Header,
-        Type = SecuritySchemeType.ApiKey,
-        Description = "API key. Dev value: dev-only-do-not-use-in-prod"
-    });
-    options.AddSecurityRequirement(new OpenApiSecurityRequirement
-    {
-        [new OpenApiSecurityScheme
+        options.AddSecurityDefinition("ApiKey", new OpenApiSecurityScheme
         {
-            Reference = new OpenApiReference
+            Name = ApiKeyEndpointFilter.HeaderName,
+            In = ParameterLocation.Header,
+            Type = SecuritySchemeType.ApiKey,
+            Description = "API key. Dev value: dev-only-do-not-use-in-prod"
+        });
+        options.AddSecurityRequirement(new OpenApiSecurityRequirement
+        {
+            [new OpenApiSecurityScheme
             {
-                Type = ReferenceType.SecurityScheme,
-                Id = "ApiKey"
-            }
-        }] = Array.Empty<string>()
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id = "ApiKey"
+                }
+            }] = Array.Empty<string>()
+        });
     });
-});
+}
 
 var app = builder.Build();
 
@@ -124,11 +132,13 @@ if (useWindowsCertStoreTls)
     app.Services.GetRequiredService<IServerCertificateProvider>();
 }
 
-if (app.Environment.IsDevelopment())
+if (swaggerEnabled)
 {
     app.UseSwagger();
     app.UseSwaggerUI();
 }
+
+app.Logger.LogInformation("Swagger UI {State}", swaggerEnabled ? "enabled" : "disabled");
 
 var configuredKeys = builder.Configuration.GetSection("ApiKey:Keys").Get<string[]>() ?? Array.Empty<string>();
 if (!configuredKeys.Any(k => !string.IsNullOrWhiteSpace(k)))
