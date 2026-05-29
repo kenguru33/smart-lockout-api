@@ -327,8 +327,8 @@ Once running, smoke-test from the AD FS server. `-k` because the LE cert
 is for `<hostname>`, not the loopback:
 
 ```powershell
-# 0. /health — unauthenticated liveness probe, 200 "Healthy"
-curl -ik https://127.0.0.1:5199/health
+# 0. /health — unauthenticated readiness probe (AD FS + AD + cert, 30 s cached)
+curl -ik https://127.0.0.1:5199/health   # → 200 Healthy when all three pass
 
 # 1. 401 — no key
 curl -ik https://127.0.0.1:5199/api/adfs/smart-lockout/not-a-upn

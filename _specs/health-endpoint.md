@@ -161,8 +161,14 @@ that document.
 3. ~~**Path collision:**~~ **Resolved** — `/health` does not collide with
    any current route (everything else is under `/api/adfs/...` or
    `/api/ad/...`). Confirmed safe.
-4. ~~**Future `/ready`:**~~ **Resolved (out of scope)** — split liveness
-   (`/health`) and readiness (`/ready` or `/health/ready`) is the
-   recommended pattern when readiness probing is actually needed. Not part
-   of this feature; if/when added later it will be a separate endpoint
-   with its own auth-posture decision.
+4. ~~**Future `/ready`:**~~ **Superseded** — the deferred deeper checks
+   were folded into `/health` itself rather than added as a separate
+   `/ready` endpoint. `/health` now runs three real checks: AD FS
+   reachability (`Get-AdfsProperties`), AD reachability (`Get-ADRootDSE`),
+   and TLS-cert freshness (in-process, Degraded inside the 14-day expiry
+   window). Each PowerShell-based check has a 3 s timeout; all three are
+   wrapped in a 30 s cache to avoid pounding AD/AD FS at monitor polling
+   rates and to avoid queueing on the existing runspace gates behind real
+   requests. Trade-off accepted: a real AD/AD FS outage now marks the
+   service unhealthy and may pull it out of rotation behind a load
+   balancer. See `HealthChecks/` for the implementation.

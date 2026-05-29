@@ -285,6 +285,32 @@ public sealed class PowerShellAdUserPhoneService : IAdUserPhoneService, IDisposa
         return (null, dn);
     }
 
+    // Cheapest LDAP probe — Get-ADRootDSE returns the directory root entry
+    // without touching any user object. Confirms a DC is reachable. Throws on
+    // failure so the calling IHealthCheck can map that to Unhealthy.
+    public async Task PingAsync(CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var ps = PowerShell.Create();
+            ps.Runspace = _runspace;
+            ps.AddCommand("Get-ADRootDSE");
+
+            await ps.InvokeAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+
+            if (ps.HadErrors)
+            {
+                var message = ps.Streams.Error.FirstOrDefault()?.ToString() ?? "Unknown PowerShell error";
+                throw new InvalidOperationException($"Get-ADRootDSE reported errors: {message}");
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     public void Dispose()
     {
         _gate.Dispose();

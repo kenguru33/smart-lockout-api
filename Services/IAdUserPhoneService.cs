@@ -10,4 +10,8 @@ public interface IAdUserPhoneService
         string upn,
         UpdateAdUserPhoneRequest request,
         CancellationToken cancellationToken);
+
+    // Health probe: confirms a domain controller is reachable via LDAP.
+    // Throws on failure or timeout; returns on success. Used by AdHealthCheck.
+    Task PingAsync(CancellationToken cancellationToken);
 }
