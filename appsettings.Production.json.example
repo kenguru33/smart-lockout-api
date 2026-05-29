@@ -10,7 +10,10 @@
     },
     "EventLog": {
       "SourceName": "SmartLockoutApi",
-      "LogName": "Application"
+      "LogName": "Application",
+      "LogLevel": {
+        "Microsoft.AspNetCore.Hosting.Diagnostics": "Warning"
+      }
     }
   },
 
