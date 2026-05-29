@@ -7,6 +7,7 @@
 // ApiKey:Keys from configuration. TLS is the deployer's responsibility.
 
 using System.Security.Authentication;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.OpenApi.Models;
 using SmartLockoutApi.Services;
 using SmartLockoutApi.Tls;
@@ -78,6 +79,14 @@ builder.Services.AddSingleton<IAdfsSmartLockoutService, PowerShellAdfsSmartLocko
 builder.Services.AddSingleton<IAdUserPhoneService, PowerShellAdUserPhoneService>();
 builder.Services.AddSingleton<ApiKeyEndpointFilter>();
 
+// /health is an unauthenticated liveness probe. The "self" check always
+// returns Healthy — its job is to give monitors/load balancers a 200 when
+// the process is responding. Deeper checks (AD FS reachability, cert
+// freshness, etc.) are deliberately not registered here; they belong on a
+// future /ready endpoint.
+builder.Services.AddHealthChecks()
+    .AddCheck("self", () => HealthCheckResult.Healthy(), tags: new[] { "live" });
+
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
 {
@@ -128,6 +137,12 @@ if (!configuredKeys.Any(k => !string.IsNullOrWhiteSpace(k)))
         "ApiKey:Keys is empty; every request will be rejected with 401. " +
         "Set ApiKey__Keys__0 (and __1 during rotation) before deploying.");
 }
+
+// Liveness probe. Deliberately NOT gated by ApiKeyEndpointFilter — monitors
+// and the SCM should not need the API key. Body: "Healthy" / "Unhealthy".
+// (MapHealthChecks returns IEndpointConventionBuilder, which does not carry
+// .Produces() metadata — Swagger visibility is best-effort.)
+app.MapHealthChecks("/health").WithName("Health");
 
 app.MapGet("/api/adfs/smart-lockout/{upn}", async (
     string upn,

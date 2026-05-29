@@ -14,14 +14,15 @@ AD FS / domain controllers.
 
 | Method | Path                                   | Effect |
 |--------|----------------------------------------|--------|
+| GET    | `/health`                              | Liveness probe — 200 `Healthy` when the process is up. **Unauthenticated.** |
 | GET    | `/api/adfs/smart-lockout/{upn}`        | `Get-AdfsAccountActivity -Identity <upn>` |
 | POST   | `/api/adfs/smart-lockout/{upn}/reset`  | `Reset-AdfsAccountLockout -Identity <upn>` (204 on success; AUDIT logged) |
 | GET    | `/api/ad/user/{upn}/phone`             | `Get-ADUser` returning `mobile` + `telephoneNumber` |
 | PATCH  | `/api/ad/user/{upn}/phone`             | `Set-ADUser` — partial update; AUDIT logged |
 
-All endpoints are gated by an `X-API-Key` header (see §4.3). State-changing
-endpoints emit an `AUDIT` log line on every attempt with caller IP, target
-UPN, and what changed.
+All endpoints **except `/health`** are gated by an `X-API-Key` header
+(see §4.3). State-changing endpoints emit an `AUDIT` log line on every
+attempt with caller IP, target UPN, and what changed.
 
 Status codes (consistent across endpoints):
 
@@ -86,6 +87,23 @@ $HOST = 'api.example.no'
 $KEY  = '<api-key>'
 $UPN  = 'alice@example.com'
 ```
+
+### Liveness probe (unauthenticated)
+
+```bash
+curl -i https://$HOST:5199/health
+```
+
+```
+HTTP/1.1 200 OK
+Content-Type: text/plain
+
+Healthy
+```
+
+This is the endpoint to wire into monitors / load balancers / the SCM. It
+takes no API key, hits no PowerShell / AD code paths, and is filtered out
+of the Event Log access trail so high-frequency polling stays quiet.
 
 ### Read AD FS smart-lockout state
 
