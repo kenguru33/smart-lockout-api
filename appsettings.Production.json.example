@@ -26,5 +26,9 @@
       "StoreLocation": "LocalMachine",
       "RefreshInterval": "00:05:00"
     }
+  },
+
+  "Swagger": {
+    "Enabled": false
   }
 }

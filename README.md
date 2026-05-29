@@ -425,6 +425,14 @@ during a later refresh log a Warning and keep the previous cert in use.
 
 For the full TLS design, see `_specs/server-tls-cert-from-windows-store.md`.
 
+Swagger UI is **off** in production by default. To turn it on temporarily for
+debugging, set `Swagger__Enabled=true` (machine env var), restart the service,
+then clear the env var and restart again when you're done. This replaces the
+older trick of running with `ASPNETCORE_ENVIRONMENT=Development` in
+production. Note: when Swagger is enabled, the **Authorize** button stashes
+the entered API key in browser `localStorage` — clear the browser session
+after debugging.
+
 ### 4.5. Service account: required permissions
 
 The service account needs six things; the included
@@ -559,3 +567,9 @@ up with `Remove-NetFirewallRule`, `dsacls /R`, `certlm.msc`, and
   If/when a per-caller identity becomes necessary, the next step is Windows
   Auth (Negotiate/Kerberos) or Microsoft.Identity.Web for Entra ID — keep
   the surface area small until then.
+- **Swagger UI is off in production by default** (`Swagger:Enabled = false`)
+  and only turned on for transient debugging via `Swagger__Enabled=true` +
+  restart. When enabled, the **Authorize** button stores the entered API
+  key in browser `localStorage`; clear the browser session (or use a
+  private window) after debugging so the key does not persist on the
+  operator's machine.
