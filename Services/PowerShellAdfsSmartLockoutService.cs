@@ -225,6 +225,32 @@ public sealed class PowerShellAdfsSmartLockoutService : IAdfsSmartLockoutService
         return new ResetLockoutResult.Success(upn);
     }
 
+    // Cheapest no-argument AD FS cmdlet that confirms the local AD FS service
+    // is up and the runspace is still usable. Throws on failure so the
+    // calling IHealthCheck can map that to Unhealthy.
+    public async Task PingAsync(CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var ps = PowerShell.Create();
+            ps.Runspace = _runspace;
+            ps.AddCommand("Get-AdfsProperties");
+
+            await ps.InvokeAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+
+            if (ps.HadErrors)
+            {
+                var message = ps.Streams.Error.FirstOrDefault()?.ToString() ?? "Unknown PowerShell error";
+                throw new InvalidOperationException($"Get-AdfsProperties reported errors: {message}");
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     public void Dispose()
     {
         _gate.Dispose();

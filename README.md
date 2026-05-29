@@ -14,7 +14,7 @@ AD FS / domain controllers.
 
 | Method | Path                                   | Effect |
 |--------|----------------------------------------|--------|
-| GET    | `/health`                              | Liveness probe — 200 `Healthy` when the process is up. **Unauthenticated.** |
+| GET    | `/health`                              | Readiness probe — 200 `Healthy` when AD FS, AD, and the TLS cert all check out. **Unauthenticated.** |
 | GET    | `/api/adfs/smart-lockout/{upn}`        | `Get-AdfsAccountActivity -Identity <upn>` |
 | POST   | `/api/adfs/smart-lockout/{upn}/reset`  | `Reset-AdfsAccountLockout -Identity <upn>` (204 on success; AUDIT logged) |
 | GET    | `/api/ad/user/{upn}/phone`             | `Get-ADUser` returning `mobile` + `telephoneNumber` |
@@ -88,7 +88,7 @@ $KEY  = '<api-key>'
 $UPN  = 'alice@example.com'
 ```
 
-### Liveness probe (unauthenticated)
+### Readiness probe (unauthenticated)
 
 ```bash
 curl -i https://$HOST:5199/health
@@ -101,9 +101,18 @@ Content-Type: text/plain
 Healthy
 ```
 
-This is the endpoint to wire into monitors / load balancers / the SCM. It
-takes no API key, hits no PowerShell / AD code paths, and is filtered out
-of the Event Log access trail so high-frequency polling stays quiet.
+Wired into monitors / load balancers / the SCM. Returns:
+
+- `200 Healthy` when AD FS (`Get-AdfsProperties`), AD (`Get-ADRootDSE`),
+  and the TLS cert all pass.
+- `200 Degraded` when the TLS cert expires within the next 14 days (early
+  warning; the service is still functional).
+- `503 Unhealthy` when any check fails or times out (3 s per PowerShell
+  probe).
+
+Results are cached for 30 s, so a monitor polling once per second still
+produces at most one real AD / AD FS probe every half-minute. The
+endpoint is filtered out of the Event Log access trail.
 
 ### Read AD FS smart-lockout state
 

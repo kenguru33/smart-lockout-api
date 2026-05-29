@@ -9,6 +9,7 @@
 using System.Security.Authentication;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.OpenApi.Models;
+using SmartLockoutApi.HealthChecks;
 using SmartLockoutApi.Services;
 using SmartLockoutApi.Tls;
 using SmartLockoutApi.Validation;
@@ -79,13 +80,27 @@ builder.Services.AddSingleton<IAdfsSmartLockoutService, PowerShellAdfsSmartLocko
 builder.Services.AddSingleton<IAdUserPhoneService, PowerShellAdUserPhoneService>();
 builder.Services.AddSingleton<ApiKeyEndpointFilter>();
 
-// /health is an unauthenticated liveness probe. The "self" check always
-// returns Healthy — its job is to give monitors/load balancers a 200 when
-// the process is responding. Deeper checks (AD FS reachability, cert
-// freshness, etc.) are deliberately not registered here; they belong on a
-// future /ready endpoint.
-builder.Services.AddHealthChecks()
-    .AddCheck("self", () => HealthCheckResult.Healthy(), tags: new[] { "live" });
+// /health runs three real readiness checks: AD FS reachability (Get-AdfsProperties),
+// AD reachability (Get-ADRootDSE), and TLS-cert freshness (in-process). Each
+// PowerShell-based check has a 3 s timeout and all three are wrapped in a 30 s
+// cache (CachedHealthCheck<TInner>) to avoid pounding AD/AD FS at monitor
+// polling rates and to avoid queueing on the runspace gates behind real requests.
+// The cert check is registered only when the cert-store TLS branch is active.
+builder.Services.AddSingleton<AdfsHealthCheck>();
+builder.Services.AddSingleton<AdHealthCheck>();
+builder.Services.AddSingleton<CachedHealthCheck<AdfsHealthCheck>>();
+builder.Services.AddSingleton<CachedHealthCheck<AdHealthCheck>>();
+
+var healthChecks = builder.Services.AddHealthChecks()
+    .AddCheck<CachedHealthCheck<AdfsHealthCheck>>("adfs", tags: new[] { "ready" })
+    .AddCheck<CachedHealthCheck<AdHealthCheck>>("ad", tags: new[] { "ready" });
+
+if (useWindowsCertStoreTls)
+{
+    builder.Services.AddSingleton<CertificateHealthCheck>();
+    builder.Services.AddSingleton<CachedHealthCheck<CertificateHealthCheck>>();
+    healthChecks.AddCheck<CachedHealthCheck<CertificateHealthCheck>>("cert", tags: new[] { "ready" });
+}
 
 // Swagger / OpenAPI is config-driven: on when Swagger:Enabled=true, off
 // otherwise. Default is off (GetValue<bool> returns false for a missing key).
