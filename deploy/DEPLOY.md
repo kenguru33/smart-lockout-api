@@ -461,6 +461,30 @@ Restart-Service SmartLockoutApi
 
 ---
 
+## Appendix A2 — Updating an existing install
+
+Once the initial install is done, subsequent code updates are one script,
+run from an elevated PowerShell on the AD FS server (assumes the repo is
+cloned there):
+
+```powershell
+C:\api\smart-lockout-api\deploy\Deploy.ps1
+```
+
+It pulls (`--ff-only`), builds, publishes, stops the service, copies the
+publish output over the install directory, starts the service again, and
+verifies `/health`. The service is only stopped after a successful build,
+and is restarted even if the copy fails. Paths and service name are
+parameters if your layout differs:
+
+```powershell
+.\Deploy.ps1 -RepoDir 'C:\api\smart-lockout-api' `
+             -InstallDir 'C:\Program Files\smart-lockout-api' `
+             -ServiceName 'SmartLockoutApi'
+```
+
+---
+
 ## Appendix B — Backup / disaster recovery
 
 The deployment's recoverable state lives in three places:
