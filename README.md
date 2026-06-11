@@ -543,6 +543,57 @@ up with `Remove-NetFirewallRule`, `dsacls /R`, `certlm.msc`, and
 
 ---
 
+## 5. Deploy new code to an existing install
+
+Once the initial install (§4) is done, shipping a new version is one script.
+It assumes the repo is cloned on the server (default `C:\api\smart-lockout-api`)
+and the service is installed (default name `SmartLockoutApi`, running from
+`C:\Program Files\smart-lockout-api`).
+
+From an elevated PowerShell on the AD FS server:
+
+```powershell
+C:\api\smart-lockout-api\deploy\Deploy.ps1
+```
+
+The script runs these steps, in order:
+
+1. `git pull --ff-only` in the repo.
+2. `dotnet build -c Release` — with `TreatWarningsAsErrors`, so a bad build
+   stops the deploy **before** the service is touched.
+3. `dotnet publish -c Release -r win-x64 -p:SelfContained=true` into
+   `bin\Release\net8.0\publish` (cleaned first, so stale artifacts never ship).
+4. `Stop-Service SmartLockoutApi` and wait for it to fully stop.
+5. Copy the publish output over the install directory. If the copy fails,
+   the service is restarted on the old binaries.
+6. `Start-Service SmartLockoutApi`, then poll `https://127.0.0.1:5199/health`
+   for up to 20 s and fail loudly if it never answers.
+
+Paths and service name are parameters if your layout differs:
+
+```powershell
+.\Deploy.ps1 -RepoDir 'C:\api\smart-lockout-api' `
+             -InstallDir 'C:\Program Files\smart-lockout-api' `
+             -ServiceName 'SmartLockoutApi'
+```
+
+Notes:
+
+- The copy overwrites files but never deletes — a hand-placed
+  `appsettings.Production.json` in the install directory survives deploys.
+  The tracked `appsettings.json` is overwritten, so host-specific config
+  belongs in `appsettings.Production.json` or machine environment variables
+  (§4.3–4.4), never in edits to tracked files.
+- To deploy without a clone on the server, publish elsewhere (§3), zip,
+  extract over the install directory between `Stop-Service`/`Start-Service` —
+  same swap, manual.
+- Verify afterwards: `Get-Service SmartLockoutApi` is **Running** and the
+  smoke tests in §4 pass. To roll back, `git revert` the offending commit
+  on `main`, push, and run `Deploy.ps1` again — the script always deploys
+  whatever `git pull` lands on, so rolling back is just another deploy.
+
+---
+
 ## Security
 
 - **API key auth.** Every request must carry `X-API-Key` matching an entry
