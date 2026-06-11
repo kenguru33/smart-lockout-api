@@ -45,7 +45,18 @@ $PublishDir = Join-Path $RepoDir 'bin\Release\net8.0\publish'
 function Invoke-Step {
     param([string]$Name, [scriptblock]$Action)
     Write-Host "==> $Name" -ForegroundColor Cyan
-    & $Action
+    # Native commands (git, dotnet) write progress to stderr; under
+    # ErrorActionPreference=Stop PS 5.1 turns that into a terminating error.
+    # Relax it for the duration and judge success by exit code alone;
+    # 2>&1 + stringify keeps stderr lines as plain output.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $Action 2>&1 | ForEach-Object { "$_" }
+    }
+    finally {
+        $ErrorActionPreference = $prevEap
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "$Name failed (exit code $LASTEXITCODE)."
     }
