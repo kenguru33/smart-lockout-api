@@ -11,16 +11,19 @@
     <StaticWebAssetsEnabled>false</StaticWebAssetsEnabled>
   </PropertyGroup>
 
-  <!-- Activated by `dotnet publish -p:PublishSingleFile=true`. Dormant for dotnet build/run. -->
-  <PropertyGroup Condition="'$(PublishSingleFile)' == 'true'">
-    <SelfContained>true</SelfContained>
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
-    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <PublishTrimmed>false</PublishTrimmed>
-    <!-- PS SDK uses Assembly.Location etc.; IL3xxx are known/benign without trimming. -->
-    <NoWarn>$(NoWarn);IL3000;IL3001;IL3002;IL3003</NoWarn>
-  </PropertyGroup>
+  <!--
+    Publish: `dotnet publish -c Release -r win-x64 -p:SelfContained=true -o <dir>`.
+    RID/self-contained are passed on the CLI, not set here, so the
+    dotnet build/run dev loop on Linux is unaffected.
+
+    Do NOT publish single-file (PublishSingleFile): Microsoft.PowerShell.SDK
+    7.4.x cannot initialize inside a .NET 8 single-file bundle: Assembly.Location
+    is empty, so InitialSessionState.CreateDefault() throws ArgumentNullException
+    in PSSnapInReader.ReadEnginePSSnapIns at startup
+    (https://github.com/PowerShell/PowerShell/issues/23797; fixed only in
+    PS 7.5, which requires .NET 9).
+    Do NOT enable PublishTrimmed: the PS SDK relies on reflection.
+  -->
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.1" />

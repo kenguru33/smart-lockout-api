@@ -81,34 +81,29 @@ other → Error).
 ## Publishing
 
 ```
-dotnet publish -c Release -p:PublishSingleFile=true -o publish
+dotnet publish -c Release -r win-x64 -p:SelfContained=true -o bin/Release/net8.0/publish
 ```
 
-The publish properties (`SelfContained`, `RuntimeIdentifier=win-x64`,
-`EnableCompressionInSingleFile`, etc.) live in a `Condition="'$(PublishSingleFile)' == 'true'"`
-PropertyGroup in `SmartLockoutApi.csproj`. They are dormant during `dotnet build` /
-`dotnet run` so the dev loop still works on Linux.
+RID and self-contained are passed on the CLI, not set in the csproj, so the
+`dotnet build` / `dotnet run` dev loop on Linux is unaffected.
 
-The deploy unit is **a folder, not a single file**, despite the name:
-
-- `SmartLockoutApi.exe` (~63 MB) — self-contained, compressed, win-x64.
-- `runtimes/` (~350 KB) — PowerShell built-in module manifests. The PS engine
-  resolves these from disk next to the exe; this is a Microsoft.PowerShell.SDK
-  constraint, not something we can configure away. Do not delete this folder.
-- `appsettings.json` (+ Development) and `web.config` — content files.
-
-If a true single-artifact deliverable is required, ship `publish/` as a zip.
+The deploy unit is the whole publish folder (~150 MB, ~630 files): the exe,
+every runtime + PS SDK assembly, the PowerShell built-in modules under
+`runtimes/win/lib/net8.0/Modules/`, `appsettings.json` (+ Development), and
+`web.config`. Ship it as a zip; on the server, `deploy/Deploy.ps1` automates
+pull → build → publish → service swap.
 
 Constraints to preserve if you touch the publish config:
 
+- **Never publish single-file** (`-p:PublishSingleFile=true`).
+  Microsoft.PowerShell.SDK 7.4.x cannot initialize inside a .NET 8
+  single-file bundle: `Assembly.Location` is empty there, so
+  `InitialSessionState.CreateDefault()` throws
+  `ArgumentNullException (path1)` in `PSSnapInReader.ReadEnginePSSnapIns`
+  and the service dies at startup
+  (PowerShell/PowerShell#23797 — fixed only in PS 7.5, which requires .NET 9).
 - **Never enable `PublishTrimmed`.** PS SDK uses reflection extensively;
   trimming will silently break cmdlet discovery and type loading at runtime.
-- `IL3000`–`IL3003` are in `NoWarn` only under the publish condition. They
-  come from PS SDK calling `Assembly.Location` and similar; benign without
-  trimming.
-- First run on the target extracts native libs to
-  `%TEMP%\.net\SmartLockoutApi\<hash>\`. Override with
-  `DOTNET_BUNDLE_EXTRACT_BASE_DIR` if `%TEMP%` is locked down on the AD FS server.
 
 ## Auth
 

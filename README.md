@@ -285,41 +285,44 @@ keys must come from environment variables — see §4.3.
 
 ---
 
-## 3. Publish a self-contained Windows executable
+## 3. Publish a self-contained Windows folder
 
 Cross-publish from any OS that has the .NET 8 SDK:
 
 ```
-dotnet publish -c Release -p:PublishSingleFile=true -o publish
+dotnet publish -c Release -r win-x64 -p:SelfContained=true -o bin/Release/net8.0/publish
 ```
 
-This produces `publish/` (~66 MB total):
+This produces a publish folder (~150 MB, ~630 files):
 
-| Path                                | Size   | Purpose                                                          |
-|-------------------------------------|--------|------------------------------------------------------------------|
-| `SmartLockoutApi.exe`               | ~63 MB | Self-contained, compressed, win-x64. .NET 8 runtime + app + PS SDK. PDB embedded. |
-| `runtimes/`                         | ~350 KB | PowerShell built-in module manifests. PS engine loads them from disk next to the exe; cannot be bundled into the exe. **Do not delete.** |
-| `appsettings.json` (+ Development)  | <1 KB  | Editable on the target host.                                     |
-| `web.config`                        | 472 B  | Web SDK artifact for IIS. Harmless when running standalone; delete if you like. |
+| Path                                | Purpose                                                          |
+|-------------------------------------|------------------------------------------------------------------|
+| `SmartLockoutApi.exe`               | App host. PDB embedded.                                          |
+| `*.dll` + locale folders            | .NET 8 runtime + app + PowerShell SDK assemblies.                |
+| `runtimes/`                         | Native libs per platform and the PowerShell built-in modules (`runtimes/win/lib/net8.0/Modules/`). **Do not delete.** |
+| `appsettings.json` (+ Development)  | Editable on the target host.                                     |
+| `web.config`                        | Web SDK artifact for IIS. Harmless when running standalone; delete if you like. |
 
-If you need a single deliverable, **zip the `publish/` folder**:
+The whole folder is the deploy unit. If you need a single deliverable, **zip it**:
 
 ```
 # Windows PowerShell
-Compress-Archive -Path publish\* -DestinationPath SmartLockoutApi.zip
+Compress-Archive -Path bin\Release\net8.0\publish\* -DestinationPath SmartLockoutApi.zip
 
 # Linux/macOS
-(cd publish && zip -r ../SmartLockoutApi.zip .)
+(cd bin/Release/net8.0/publish && zip -r ~/SmartLockoutApi.zip .)
 ```
 
-Notes on the publish profile (configured in `SmartLockoutApi.csproj`):
+Notes on the publish configuration:
 
+- **Do not publish single-file** (`-p:PublishSingleFile=true`). PowerShell SDK
+  7.4.x cannot initialize inside a .NET 8 single-file bundle — the service
+  crashes at startup with `ArgumentNullException` in
+  `PSSnapInReader.ReadEnginePSSnapIns`
+  ([PowerShell/PowerShell#23797](https://github.com/PowerShell/PowerShell/issues/23797);
+  fixed only in PS 7.5, which requires .NET 9).
 - `PublishTrimmed` is **off** — Microsoft.PowerShell.SDK uses heavy reflection
   and breaks under trimming.
-- `IL3000`–`IL3003` warnings are suppressed only when publishing; they come
-  from PS SDK calling `Assembly.Location` and are known/benign.
-- Compression is on (`EnableCompressionInSingleFile=true`); first-run startup
-  pays a small decompression cost.
 
 The `deploy/` folder ships with the repo and contains `Setup-ServiceAccount.ps1`
 (see §4.5). It is not part of `publish/`; copy it separately if you want it on
@@ -501,14 +504,6 @@ curl -ik -H "X-API-Key: <your-key>" `
 key is wrong, or 500 with "Access is denied" if the service account lacks AD
 FS admin rights.
 
-First run extracts native libs to `%TEMP%\.net\SmartLockoutApi\<hash>\`. If
-`%TEMP%` is locked down, point the extractor elsewhere via a machine env var:
-
-```powershell
-[Environment]::SetEnvironmentVariable("DOTNET_BUNDLE_EXTRACT_BASE_DIR", `
-  "C:\ProgramData\SmartLockoutApi\bundle", "Machine")
-```
-
 ### 4.7. Logs
 
 In production on Windows (non-Development environment) the app writes
@@ -539,7 +534,6 @@ State-changing endpoints emit greppable audit lines:
 Stop-Service SmartLockoutApi
 sc.exe delete SmartLockoutApi
 Remove-Item "C:\Program Files\SmartLockoutApi" -Recurse -Force
-Remove-Item "C:\ProgramData\SmartLockoutApi" -Recurse -Force  # if DOTNET_BUNDLE_EXTRACT_BASE_DIR was set
 ```
 
 The Windows Firewall rule, the AD delegation, the cert ACL, and the local

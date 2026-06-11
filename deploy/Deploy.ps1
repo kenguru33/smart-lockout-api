@@ -65,7 +65,9 @@ try {
     if (Test-Path $PublishDir) {
         Remove-Item $PublishDir -Recurse -Force
     }
-    Invoke-Step 'dotnet publish' { dotnet publish -c Release -p:PublishSingleFile=true -o $PublishDir }
+    # NOT single-file: PS SDK 7.4 can't initialize inside a .NET 8 single-file
+    # bundle (PowerShell/PowerShell#23797) — the service dies at startup.
+    Invoke-Step 'dotnet publish' { dotnet publish -c Release -r win-x64 -p:SelfContained=true -o $PublishDir }
 }
 finally {
     Pop-Location

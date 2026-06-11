@@ -59,14 +59,19 @@ with `FamiliarLockout`/`UnknownLockout` always `False` — the API still
 From the repo root:
 
 ```
-dotnet publish -c Release -p:PublishSingleFile=true -o publish
+dotnet publish -c Release -r win-x64 -p:SelfContained=true -o bin/Release/net8.0/publish
 ```
 
-Verify the publish output:
+Do **not** add `-p:PublishSingleFile=true` — PowerShell SDK 7.4 cannot
+initialize inside a .NET 8 single-file bundle and the service crashes at
+startup (PowerShell/PowerShell#23797).
+
+Verify the publish output (~150 MB, ~630 files):
 
 ```
-ls publish/
-# expect: SmartLockoutApi.exe, runtimes/, appsettings.json, appsettings.Development.json, web.config
+ls bin/Release/net8.0/publish/
+# expect: SmartLockoutApi.exe, System.Management.Automation.dll, many other
+# DLLs, runtimes/, appsettings.json, appsettings.Development.json, web.config
 ```
 
 Bundle the publish output **plus** the `deploy/` folder for transfer:
@@ -74,15 +79,15 @@ Bundle the publish output **plus** the `deploy/` folder for transfer:
 ```powershell
 # Windows PowerShell
 New-Item -ItemType Directory -Force staging | Out-Null
-Copy-Item publish\*  staging\ -Recurse
-Copy-Item deploy     staging\ -Recurse
+Copy-Item bin\Release\net8.0\publish\*  staging\ -Recurse
+Copy-Item deploy                        staging\ -Recurse
 Compress-Archive -Path staging\* -DestinationPath SmartLockoutApi.zip -Force
 Remove-Item staging -Recurse -Force
 ```
 
 ```bash
 # Linux / macOS
-mkdir -p staging && cp -r publish/* staging/ && cp -r deploy staging/
+mkdir -p staging && cp -r bin/Release/net8.0/publish/* staging/ && cp -r deploy staging/
 (cd staging && zip -r ../SmartLockoutApi.zip .)
 rm -rf staging
 ```
@@ -199,7 +204,8 @@ After extraction `<install-path>` contains:
 ```
 <install-path>\
 ├── SmartLockoutApi.exe
-├── runtimes\               ← do not delete
+├── System.Management.Automation.dll   (+ ~400 other runtime/PS SDK DLLs)
+├── runtimes\               ← native libs + PS built-in modules; do not delete
 ├── appsettings.json
 ├── appsettings.Development.json
 ├── web.config              (optional; safe to delete if not using IIS)
@@ -297,7 +303,6 @@ Optional overrides only if you need non-defaults:
 
 ```powershell
 # [Environment]::SetEnvironmentVariable('Kestrel__Certificate__RefreshInterval', '00:05:00', 'Machine')
-# [Environment]::SetEnvironmentVariable('DOTNET_BUNDLE_EXTRACT_BASE_DIR',         'C:\ProgramData\SmartLockoutApi\bundle', 'Machine')
 ```
 
 Capture the API key into your password manager — it's the **only** time
