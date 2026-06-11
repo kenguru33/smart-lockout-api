@@ -10,8 +10,8 @@
       1. git pull (fast-forward only) in the repo directory.
       2. dotnet build -c Release (TreatWarningsAsErrors catches problems
          before the service is touched).
-      3. dotnet publish into <repo>\publish (cleaned first, so stale
-         artefacts never ship).
+      3. dotnet publish into <repo>\bin\Release\net8.0\publish (cleaned
+         first, so stale artefacts never ship).
       4. Stop the Windows service and wait for it to fully stop.
       5. Copy the publish output over the install directory.
       6. Start the service again and verify /health responds.
@@ -40,7 +40,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$PublishDir = Join-Path $RepoDir 'publish'
+$PublishDir = Join-Path $RepoDir 'bin\Release\net8.0\publish'
 
 function Invoke-Step {
     param([string]$Name, [scriptblock]$Action)
