@@ -23,13 +23,13 @@ namespace SmartLockoutApi.Services;
 // $variable does not work here: the ActiveDirectory module runs in the hidden
 // Windows PowerShell 5.1 compat session via -UseWindowsPowerShell, and the
 // filter expression is evaluated in that session where the variable is unset.)
-public sealed class PowerShellAdUserPhoneService : IAdUserPhoneService, IDisposable
+public sealed class PowerShellAdUserDirectoryService : IAdUserDirectoryService, IDisposable
 {
-    private readonly ILogger<PowerShellAdUserPhoneService> _logger;
+    private readonly ILogger<PowerShellAdUserDirectoryService> _logger;
     private readonly Runspace _runspace;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
-    public PowerShellAdUserPhoneService(ILogger<PowerShellAdUserPhoneService> logger)
+    public PowerShellAdUserDirectoryService(ILogger<PowerShellAdUserDirectoryService> logger)
     {
         _logger = logger;
         _runspace = RunspaceFactory.CreateRunspace(InitialSessionState.CreateDefault());
@@ -168,16 +168,11 @@ public sealed class PowerShellAdUserPhoneService : IAdUserPhoneService, IDisposa
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var (resolved, distinguishedName) = await ResolveDistinguishedNameAsync(upn, cancellationToken)
-                .ConfigureAwait(false);
+            var (notFound, resolveError, distinguishedName) =
+                await ResolveDistinguishedNameAsync(upn, cancellationToken).ConfigureAwait(false);
 
-            switch (resolved)
-            {
-                case AdPhoneUpdateResult.NotFound nf:
-                    return nf;
-                case AdPhoneUpdateResult.Error err:
-                    return err;
-            }
+            if (notFound) return new AdPhoneUpdateResult.NotFound(upn);
+            if (resolveError is not null) return new AdPhoneUpdateResult.Error(resolveError);
 
             using var ps = PowerShell.Create();
             ps.Runspace = _runspace;
@@ -234,9 +229,132 @@ public sealed class PowerShellAdUserPhoneService : IAdUserPhoneService, IDisposa
         }
     }
 
-    // Resolves the UPN to a DistinguishedName. Returns NotFound/Error as an
-    // AdPhoneUpdateResult, or (null result, dn) on success. Caller holds the gate.
-    private async Task<(AdPhoneUpdateResult? Result, string? DistinguishedName)> ResolveDistinguishedNameAsync(
+    public async Task<AdDepartmentReadResult> GetDepartmentAsync(string upn, CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var ps = PowerShell.Create();
+            ps.Runspace = _runspace;
+
+            ps.AddCommand("Get-ADUser")
+              .AddParameter("LDAPFilter", BuildUpnLdapFilter(upn))
+              .AddParameter("Properties", new[] { "Department" });
+
+            PSDataCollection<PSObject> results;
+            try
+            {
+                results = await ps.InvokeAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Get-ADUser invocation threw for UPN {Upn}", upn);
+                return new AdDepartmentReadResult.Error($"PowerShell invocation failed: {ex.Message}");
+            }
+
+            if (ps.HadErrors)
+            {
+                var firstError = ps.Streams.Error.FirstOrDefault();
+                if (firstError?.CategoryInfo?.Category == ErrorCategory.ObjectNotFound)
+                {
+                    _logger.LogInformation("No AD user for UPN {Upn}", upn);
+                    return new AdDepartmentReadResult.NotFound(upn);
+                }
+
+                var message = firstError?.ToString() ?? "Unknown PowerShell error";
+                _logger.LogError("Get-ADUser reported errors for UPN {Upn}: {Message}", upn, message);
+                return new AdDepartmentReadResult.Error(message);
+            }
+
+            if (results.Count == 0)
+            {
+                _logger.LogInformation("Get-ADUser returned no rows for UPN {Upn}", upn);
+                return new AdDepartmentReadResult.NotFound(upn);
+            }
+
+            var user = results[0];
+            var response = new AdUserDepartmentResponse(
+                UserPrincipalName: ReadString(user, "UserPrincipalName") ?? upn,
+                Department: ReadString(user, "Department"));
+            return new AdDepartmentReadResult.Found(response);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<AdDepartmentUpdateResult> UpdateDepartmentAsync(
+        string upn,
+        UpdateAdUserDepartmentRequest request,
+        CancellationToken cancellationToken)
+    {
+        // Two gated steps, mirroring UpdatePhoneAsync: (1) resolve the user so an
+        // absent UPN surfaces as NotFound, then (2) apply the change. A non-empty
+        // value is assumed already validated/normalized by the endpoint.
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var (notFound, resolveError, distinguishedName) =
+                await ResolveDistinguishedNameAsync(upn, cancellationToken).ConfigureAwait(false);
+
+            if (notFound) return new AdDepartmentUpdateResult.NotFound(upn);
+            if (resolveError is not null) return new AdDepartmentUpdateResult.Error(resolveError);
+
+            using var ps = PowerShell.Create();
+            ps.Runspace = _runspace;
+
+            // DistinguishedName is bound as a typed parameter, never interpolated.
+            var set = ps.AddCommand("Set-ADUser").AddParameter("Identity", distinguishedName);
+
+            // "" → clear; non-empty → set. (null is rejected by the endpoint.)
+            if (request.Department!.Length == 0) set.AddParameter("Clear", new[] { "department" });
+            else set.AddParameter("Department", request.Department);
+
+            try
+            {
+                await ps.InvokeAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Set-ADUser invocation threw for UPN {Upn}", upn);
+                return new AdDepartmentUpdateResult.Error($"PowerShell invocation failed: {ex.Message}");
+            }
+
+            if (ps.HadErrors)
+            {
+                var firstError = ps.Streams.Error.FirstOrDefault();
+                if (firstError?.CategoryInfo?.Category == ErrorCategory.ObjectNotFound)
+                {
+                    return new AdDepartmentUpdateResult.NotFound(upn);
+                }
+
+                var message = firstError?.ToString() ?? "Unknown PowerShell error";
+                _logger.LogError("Set-ADUser reported errors for UPN {Upn}: {Message}", upn, message);
+                return new AdDepartmentUpdateResult.Error(message);
+            }
+
+            return new AdDepartmentUpdateResult.Success(upn);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    // Resolves the UPN to a DistinguishedName. Returns NotFound=true when the
+    // user is absent, a non-null Error message on failure, or a non-null Dn on
+    // success — attribute-agnostic so every Update*Async can map it into its own
+    // result type. Caller holds the gate.
+    private async Task<(bool NotFound, string? Error, string? Dn)> ResolveDistinguishedNameAsync(
         string upn, CancellationToken cancellationToken)
     {
         using var ps = PowerShell.Create();
@@ -255,7 +373,7 @@ public sealed class PowerShellAdUserPhoneService : IAdUserPhoneService, IDisposa
         catch (Exception ex)
         {
             _logger.LogError(ex, "Get-ADUser (resolve) invocation threw for UPN {Upn}", upn);
-            return (new AdPhoneUpdateResult.Error($"PowerShell invocation failed: {ex.Message}"), null);
+            return (false, $"PowerShell invocation failed: {ex.Message}", null);
         }
 
         if (ps.HadErrors)
@@ -263,26 +381,26 @@ public sealed class PowerShellAdUserPhoneService : IAdUserPhoneService, IDisposa
             var firstError = ps.Streams.Error.FirstOrDefault();
             if (firstError?.CategoryInfo?.Category == ErrorCategory.ObjectNotFound)
             {
-                return (new AdPhoneUpdateResult.NotFound(upn), null);
+                return (true, null, null);
             }
 
             var message = firstError?.ToString() ?? "Unknown PowerShell error";
             _logger.LogError("Get-ADUser (resolve) reported errors for UPN {Upn}: {Message}", upn, message);
-            return (new AdPhoneUpdateResult.Error(message), null);
+            return (false, message, null);
         }
 
         if (results.Count == 0)
         {
-            return (new AdPhoneUpdateResult.NotFound(upn), null);
+            return (true, null, null);
         }
 
         var dn = ReadString(results[0], "DistinguishedName");
         if (string.IsNullOrEmpty(dn))
         {
-            return (new AdPhoneUpdateResult.Error("Resolved AD user had no DistinguishedName."), null);
+            return (false, "Resolved AD user had no DistinguishedName.", null);
         }
 
-        return (null, dn);
+        return (false, null, dn);
     }
 
     // Cheapest LDAP probe — Get-ADRootDSE returns the directory root entry

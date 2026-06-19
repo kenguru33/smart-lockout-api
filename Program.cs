@@ -75,9 +75,9 @@ if (useWindowsCertStoreTls)
 // gets a fresh PowerShell instance attached to that runspace inside GetAsync.
 builder.Services.AddSingleton<IAdfsSmartLockoutService, PowerShellAdfsSmartLockoutService>();
 // Separate runspace/service importing the ActiveDirectory module, used for the
-// AD mobile/telephone read+update endpoints. Same singleton-with-cached-runspace
-// rationale as the AD FS service.
-builder.Services.AddSingleton<IAdUserPhoneService, PowerShellAdUserPhoneService>();
+// AD mobile/telephone and department read+update endpoints. Same
+// singleton-with-cached-runspace rationale as the AD FS service.
+builder.Services.AddSingleton<IAdUserDirectoryService, PowerShellAdUserDirectoryService>();
 builder.Services.AddSingleton<ApiKeyEndpointFilter>();
 
 // /health runs three real readiness checks: AD FS reachability (Get-AdfsProperties),
@@ -138,7 +138,7 @@ var app = builder.Build();
 // Force the PowerShell services to construct now so a module-import failure
 // stops startup instead of becoming a 500 on the first request.
 app.Services.GetRequiredService<IAdfsSmartLockoutService>();
-app.Services.GetRequiredService<IAdUserPhoneService>();
+app.Services.GetRequiredService<IAdUserDirectoryService>();
 
 // Same idea for the TLS cert provider: resolve it now so a missing / expired /
 // no-private-key cert stops startup instead of failing the first TLS handshake.
@@ -266,7 +266,7 @@ app.MapPost("/api/adfs/smart-lockout/{upn}/reset", async (
 // Read the AD mobile/telephone numbers for a UPN. Read-only — no AUDIT line.
 app.MapGet("/api/ad/user/{upn}/phone", async (
     string upn,
-    IAdUserPhoneService service,
+    IAdUserDirectoryService service,
     ILogger<Program> logger,
     CancellationToken cancellationToken) =>
 {
@@ -312,7 +312,7 @@ app.MapPatch("/api/ad/user/{upn}/phone", async (
     string upn,
     SmartLockoutApi.Dtos.UpdateAdUserPhoneRequest? request,
     HttpContext http,
-    IAdUserPhoneService service,
+    IAdUserDirectoryService service,
     ILogger<Program> logger,
     CancellationToken cancellationToken) =>
 {
@@ -397,6 +397,128 @@ app.MapPatch("/api/ad/user/{upn}/phone", async (
 })
 .AddEndpointFilter<ApiKeyEndpointFilter>()
 .WithName("UpdateAdUserPhone")
+.Produces(StatusCodes.Status204NoContent)
+.ProducesProblem(StatusCodes.Status400BadRequest)
+.ProducesProblem(StatusCodes.Status401Unauthorized)
+.ProducesProblem(StatusCodes.Status404NotFound)
+.ProducesProblem(StatusCodes.Status500InternalServerError);
+
+// Read the AD department for a UPN. Read-only — no AUDIT line.
+app.MapGet("/api/ad/user/{upn}/department", async (
+    string upn,
+    IAdUserDirectoryService service,
+    ILogger<Program> logger,
+    CancellationToken cancellationToken) =>
+{
+    if (!UpnValidator.TryValidate(upn, out var normalized))
+    {
+        logger.LogWarning("Rejecting invalid UPN input on department read");
+        return Results.Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Invalid UPN",
+            detail: "UPN must be in the form user@domain.tld and contain only allowed characters.");
+    }
+
+    logger.LogInformation("Reading AD department for UPN {Upn}", normalized);
+
+    var result = await service.GetDepartmentAsync(normalized, cancellationToken);
+
+    return result switch
+    {
+        AdDepartmentReadResult.Found f => Results.Ok(f.Response),
+        AdDepartmentReadResult.NotFound nf => Results.Problem(
+            statusCode: StatusCodes.Status404NotFound,
+            title: "AD user not found",
+            detail: $"No Active Directory user with UPN '{nf.Upn}'."),
+        AdDepartmentReadResult.Error err => Results.Problem(
+            statusCode: StatusCodes.Status500InternalServerError,
+            title: "Active Directory PowerShell call failed",
+            detail: err.Message),
+        _ => Results.Problem(statusCode: StatusCodes.Status500InternalServerError)
+    };
+})
+.AddEndpointFilter<ApiKeyEndpointFilter>()
+.WithName("GetAdUserDepartment")
+.Produces<SmartLockoutApi.Dtos.AdUserDepartmentResponse>(StatusCodes.Status200OK)
+.ProducesProblem(StatusCodes.Status400BadRequest)
+.ProducesProblem(StatusCodes.Status401Unauthorized)
+.ProducesProblem(StatusCodes.Status404NotFound)
+.ProducesProblem(StatusCodes.Status500InternalServerError);
+
+// State-changing endpoint, gated only by the shared API key, so every attempt
+// is logged at Information with caller IP and target UPN (never the value).
+// Search logs for `AUDIT update-ad-department`.
+app.MapPatch("/api/ad/user/{upn}/department", async (
+    string upn,
+    SmartLockoutApi.Dtos.UpdateAdUserDepartmentRequest? request,
+    HttpContext http,
+    IAdUserDirectoryService service,
+    ILogger<Program> logger,
+    CancellationToken cancellationToken) =>
+{
+    if (!UpnValidator.TryValidate(upn, out var normalized))
+    {
+        logger.LogWarning("Rejecting invalid UPN input on department update");
+        return Results.Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Invalid UPN",
+            detail: "UPN must be in the form user@domain.tld and contain only allowed characters.");
+    }
+
+    // null/omitted → leave unchanged; "" → clear; non-empty → set (validated).
+    var department = request?.Department;
+
+    if (department is null)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Nothing to update",
+            detail: "Provide 'department'. Use \"\" to clear it.");
+    }
+
+    if (department is { Length: > 0 })
+    {
+        if (!DepartmentValidator.TryValidate(department, out var normDepartment))
+        {
+            return Results.Problem(
+                statusCode: StatusCodes.Status400BadRequest,
+                title: "Invalid department",
+                detail: "'department' must be at most 64 characters and contain no control characters.");
+        }
+        department = normDepartment;
+    }
+
+    var caller = http.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    logger.LogInformation("AUDIT update-ad-department request: caller {Caller} target {Upn}", caller, normalized);
+
+    var result = await service.UpdateDepartmentAsync(
+        normalized,
+        new SmartLockoutApi.Dtos.UpdateAdUserDepartmentRequest(department),
+        cancellationToken);
+
+    switch (result)
+    {
+        case AdDepartmentUpdateResult.Success:
+            logger.LogInformation("AUDIT update-ad-department success: caller {Caller} target {Upn}", caller, normalized);
+            return Results.NoContent();
+        case AdDepartmentUpdateResult.NotFound nf:
+            logger.LogInformation("AUDIT update-ad-department not-found: caller {Caller} target {Upn}", caller, normalized);
+            return Results.Problem(
+                statusCode: StatusCodes.Status404NotFound,
+                title: "AD user not found",
+                detail: $"No Active Directory user with UPN '{nf.Upn}'.");
+        case AdDepartmentUpdateResult.Error err:
+            logger.LogWarning("AUDIT update-ad-department failed: caller {Caller} target {Upn} error {Error}", caller, normalized, err.Message);
+            return Results.Problem(
+                statusCode: StatusCodes.Status500InternalServerError,
+                title: "Active Directory PowerShell call failed",
+                detail: err.Message);
+        default:
+            return Results.Problem(statusCode: StatusCodes.Status500InternalServerError);
+    }
+})
+.AddEndpointFilter<ApiKeyEndpointFilter>()
+.WithName("UpdateAdUserDepartment")
 .Produces(StatusCodes.Status204NoContent)
 .ProducesProblem(StatusCodes.Status400BadRequest)
 .ProducesProblem(StatusCodes.Status401Unauthorized)

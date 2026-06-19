@@ -23,7 +23,7 @@ Write these down — every later step references them.
 | `<hostname>`           | `api.example.no`                                           | Public FQDN of the API. Must have an A/AAAA record reaching the AD FS server, and the DNS zone must support TXT updates via API (for DNS-01). |
 | `<install-path>`       | `C:\Program Files\SmartLockoutApi`                          | Where the published artefacts and `deploy/` folder land on the AD FS server. |
 | `<service-account>`    | `EXAMPLE\svc-smartlockout`                                  | AD service account that the Windows service runs as. Created in Step 3. |
-| `<user-ou>`            | `OU=Users,DC=example,DC=com`                                | OU containing users whose `mobile`/`telephoneNumber` may be updated. |
+| `<user-ou>`            | `OU=Users,DC=example,DC=com`                                | OU containing users whose `mobile`/`telephoneNumber`/`department` may be updated. |
 | `<dns-provider>`       | Cloudflare, Azure DNS, Route 53, etc.                       | win-acme has plugins for the common ones. |
 
 ---

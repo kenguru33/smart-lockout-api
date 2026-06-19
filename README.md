@@ -19,6 +19,8 @@ AD FS / domain controllers.
 | POST   | `/api/adfs/smart-lockout/{upn}/reset`  | `Reset-AdfsAccountLockout -Identity <upn>` (204 on success; AUDIT logged) |
 | GET    | `/api/ad/user/{upn}/phone`             | `Get-ADUser` returning `mobile` + `telephoneNumber` |
 | PATCH  | `/api/ad/user/{upn}/phone`             | `Set-ADUser` — partial update; AUDIT logged |
+| GET    | `/api/ad/user/{upn}/department`        | `Get-ADUser` returning `department` |
+| PATCH  | `/api/ad/user/{upn}/department`        | `Set-ADUser` — set/clear `department`; AUDIT logged |
 
 All endpoints **except `/health`** are gated by an `X-API-Key` header
 (see §4.3). State-changing endpoints emit an `AUDIT` log line on every
@@ -30,7 +32,7 @@ Status codes (consistent across endpoints):
 |------|-------------------------------------------------------------------|
 | 200  | Read endpoint, record returned                                    |
 | 204  | State-changing endpoint succeeded (reset / patch)                 |
-| 400  | UPN failed validation, or PATCH body had no actionable fields, or phone number is not a valid Norwegian number |
+| 400  | UPN failed validation, PATCH body had no actionable fields, phone number is not a valid Norwegian number, or department failed validation |
 | 401  | Missing / wrong / no-keys-configured API key                      |
 | 404  | No matching AD FS activity record or AD user                      |
 | 500  | PowerShell call failed (module missing, AD unreachable, etc.)     |
@@ -63,6 +65,20 @@ canonical E.164 before storage):
 
 ```json
 { "mobile": "+47 912 34 567", "telephoneNumber": "" }
+```
+
+Department read 200 response (`department` is `null` when unset in AD):
+
+```json
+{ "userPrincipalName": "user@contoso.com", "department": "Sales" }
+```
+
+Department PATCH body — `null`/omitted = leave unchanged (and, as the only
+field, rejected with 400), `""` = clear the attribute, non-empty = set (free
+text, trimmed, max 64 characters, no control characters):
+
+```json
+{ "department": "Sales" }
 ```
 
 ---
@@ -182,6 +198,28 @@ curl -i -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
   -d '{"mobile":"+4791234567","telephoneNumber":"+4722000000"}' \
   https://$HOST:5199/api/ad/user/$UPN/phone
 ```
+
+### Read the department
+
+```bash
+curl -s -H "X-API-Key: $KEY" https://$HOST:5199/api/ad/user/$UPN/department
+```
+
+```json
+{ "userPrincipalName": "alice@example.com", "department": "Sales" }
+```
+
+`null` means the attribute is unset in AD.
+
+### Set the department
+
+```bash
+curl -i -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"department":"Sales"}' \
+  https://$HOST:5199/api/ad/user/$UPN/department
+```
+
+Expect 204. Send `{"department":""}` to clear it.
 
 ### Error paths (no AD round-trip needed)
 
@@ -526,6 +564,7 @@ State-changing endpoints emit greppable audit lines:
 
 - `AUDIT reset-lockout` — smart-lockout reset attempts.
 - `AUDIT update-ad-phone` — phone-number updates (field names only, never values).
+- `AUDIT update-ad-department` — department updates (caller IP + UPN, never the value).
 - `TLS certificate swapped` — live cert reload after `win-acme` renewal.
 
 ### 4.8. Uninstall
@@ -615,9 +654,10 @@ Notes:
 - Phone numbers must be valid Norwegian numbers (8 national digits, optional
   `+47` / `0047` prefix), normalized to canonical E.164 (`+47XXXXXXXX`)
   before being written to AD.
-- State-changing endpoints (`POST /reset`, `PATCH /phone`) are gated by the
-  same shared API key as the read endpoints. The accepted compensating
-  control is audit logging (`AUDIT reset-lockout`, `AUDIT update-ad-phone`).
+- State-changing endpoints (`POST /reset`, `PATCH /phone`, `PATCH /department`)
+  are gated by the same shared API key as the read endpoints. The accepted
+  compensating control is audit logging (`AUDIT reset-lockout`,
+  `AUDIT update-ad-phone`, `AUDIT update-ad-department`).
   If/when a per-caller identity becomes necessary, the next step is Windows
   Auth (Negotiate/Kerberos) or Microsoft.Identity.Web for Entra ID — keep
   the surface area small until then.

@@ -9,10 +9,10 @@ public sealed class AdHealthCheck : IHealthCheck
 {
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(3);
 
-    private readonly IAdUserPhoneService _service;
+    private readonly IAdUserDirectoryService _service;
     private readonly ILogger<AdHealthCheck> _logger;
 
-    public AdHealthCheck(IAdUserPhoneService service, ILogger<AdHealthCheck> logger)
+    public AdHealthCheck(IAdUserDirectoryService service, ILogger<AdHealthCheck> logger)
     {
         _service = service;
         _logger = logger;

@@ -2,13 +2,20 @@ using SmartLockoutApi.Dtos;
 
 namespace SmartLockoutApi.Services;
 
-public interface IAdUserPhoneService
+public interface IAdUserDirectoryService
 {
     Task<AdPhoneReadResult> GetPhoneAsync(string upn, CancellationToken cancellationToken);
 
     Task<AdPhoneUpdateResult> UpdatePhoneAsync(
         string upn,
         UpdateAdUserPhoneRequest request,
+        CancellationToken cancellationToken);
+
+    Task<AdDepartmentReadResult> GetDepartmentAsync(string upn, CancellationToken cancellationToken);
+
+    Task<AdDepartmentUpdateResult> UpdateDepartmentAsync(
+        string upn,
+        UpdateAdUserDepartmentRequest request,
         CancellationToken cancellationToken);
 
     // Health probe: confirms a domain controller is reachable via LDAP.
