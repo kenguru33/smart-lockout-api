@@ -40,9 +40,20 @@ curl -ik https://127.0.0.1:5199/api/adfs/smart-lockout/user@example.com   # → 
 On a Linux dev box the cert-store branch is inert; `dotnet run` binds plain
 HTTP via launchSettings (`http://localhost:5140`).
 
-No test project exists yet. If adding one, mock `IAdfsSmartLockoutService` for
-endpoint tests and leave the PowerShell implementation as integration-tested
-on a real AD FS host — `System.Management.Automation` is awkward to mock.
+Endpoint tests live in `tests/SmartLockoutApi.Tests` (xUnit +
+`WebApplicationFactory<Program>`) and run on any OS with synthetic data —
+no AD, AD FS or Windows needed:
+
+```
+dotnet test tests/SmartLockoutApi.Tests
+```
+
+`TestApp` replaces both PowerShell-backed services with in-memory fakes
+(`FakeAdUserDirectoryService` holds a few synthetic users) and captures log
+lines so tests can assert on `AUDIT` entries. These fakes are test-only; the
+app itself still has no mock. The PowerShell implementations stay
+integration-tested on a real AD FS host — `System.Management.Automation` is
+awkward to mock. The main csproj excludes `tests/**` from its own build.
 
 ## Architecture
 

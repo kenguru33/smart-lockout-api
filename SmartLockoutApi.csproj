@@ -9,7 +9,14 @@
     <DebugType>embedded</DebugType>
     <!-- No static assets in this API; drop the empty manifest from publish output. -->
     <StaticWebAssetsEnabled>false</StaticWebAssetsEnabled>
+    <!-- The test project lives under tests/; keep its sources out of this build. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);tests/**</DefaultItemExcludes>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Lets WebApplicationFactory<Program> reach the internal top-level Program. -->
+    <InternalsVisibleTo Include="SmartLockoutApi.Tests" />
+  </ItemGroup>
 
   <!--
     Publish: `dotnet publish -c Release -r win-x64 -p:SelfContained=true -o <dir>`.
