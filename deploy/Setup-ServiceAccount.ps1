@@ -14,8 +14,8 @@
          Reset-AdfsAccountLockout, which require AD FS administrator rights.
       3. Read access to the TLS cert's private key in LocalMachine\My.
       4. Inbound Windows Firewall rule for the HTTPS port.
-      5. Delegate write on 'mobile', 'telephoneNumber' and 'department' on the
-         target OU, so Set-ADUser can update those attributes WITHOUT making the
+      5. Delegate write on 'mobile', 'telephoneNumber', 'department' and
+         'manager' on the target OU, so Set-ADUser can update those attributes WITHOUT making the
          account Account Operators or Domain Admin.
       6. Register the Windows Event Log source 'SmartLockoutApi' so the
          service (running as a non-admin account) can write Information /
@@ -39,8 +39,9 @@
 
 .PARAMETER UserOU
     Distinguished name of the OU whose users may have their mobile /
-    telephoneNumber attributes updated via /api/ad/user/{upn}/phone and their
-    department via /api/ad/user/{upn}/department.
+    telephoneNumber attributes updated via /api/ad/user/{upn}/phone, their
+    department via /api/ad/user/{upn}/department and their manager via
+    /api/ad/user/{upn}/manager.
     Example: 'OU=Users,DC=example,DC=com'.
 
 .PARAMETER Port
@@ -237,14 +238,14 @@ function New-HttpsFirewallRule {
 }
 
 # ---------------------------------------------------------------------------
-# 5. AD delegation: RPWP on 'mobile', 'telephoneNumber' and 'department' for
-#    user objects inside $UserOU. This is what makes Set-ADUser -MobilePhone /
-#    -OfficePhone / -Department work for the service account WITHOUT granting it
+# 5. AD delegation: RPWP on 'mobile', 'telephoneNumber', 'department' and
+#    'manager' for user objects inside $UserOU. This is what makes Set-ADUser
+#    -MobilePhone / -OfficePhone / -Department / -Manager work for the service account WITHOUT granting it
 #    broader AD rights.
 # ---------------------------------------------------------------------------
 function Grant-AdAttributeDelegation {
     param([string]$Account, [string]$Ou)
-    Write-Host "[5/6] Delegating write on 'mobile','telephoneNumber','department' inside $Ou..." -ForegroundColor Cyan
+    Write-Host "[5/6] Delegating write on 'mobile','telephoneNumber','department','manager' inside $Ou..." -ForegroundColor Cyan
 
     $dsacls = Get-Command dsacls.exe -ErrorAction SilentlyContinue
     if (-not $dsacls) {
@@ -252,13 +253,14 @@ function Grant-AdAttributeDelegation {
         Write-Host "  Install AD DS tools (RSAT) or run this step on a DC. Equivalent via ADUC:" -ForegroundColor Yellow
         Write-Host "    Right-click the OU -> Delegate Control -> add $Account ->" -ForegroundColor Yellow
         Write-Host "    Create a custom task -> Only the following: User objects ->" -ForegroundColor Yellow
-        Write-Host "    Property-specific -> tick Read+Write for 'mobile', 'telephoneNumber' and 'department'." -ForegroundColor Yellow
+        Write-Host "    Property-specific -> tick Read+Write for 'mobile', 'telephoneNumber', 'department' and 'manager'." -ForegroundColor Yellow
         return
     }
 
     & dsacls.exe $Ou /I:S /G "${Account}:RPWP;mobile;user"          | Out-Null
     & dsacls.exe $Ou /I:S /G "${Account}:RPWP;telephoneNumber;user" | Out-Null
     & dsacls.exe $Ou /I:S /G "${Account}:RPWP;department;user"      | Out-Null
+    & dsacls.exe $Ou /I:S /G "${Account}:RPWP;manager;user"         | Out-Null
     Write-Host "  Delegated." -ForegroundColor Green
 }
 
