@@ -525,4 +525,160 @@ app.MapPatch("/api/ad/user/{upn}/department", async (
 .ProducesProblem(StatusCodes.Status404NotFound)
 .ProducesProblem(StatusCodes.Status500InternalServerError);
 
+// Read the AD manager for a UPN. Read-only — no AUDIT line. Returns the
+// manager's UPN and display name, never the DN (it exposes OU structure).
+// 500 detail is generic; the PowerShell error is logged server-side only.
+app.MapGet("/api/ad/user/{upn}/manager", async (
+    string upn,
+    IAdUserDirectoryService service,
+    ILogger<Program> logger,
+    CancellationToken cancellationToken) =>
+{
+    if (!UpnValidator.TryValidate(upn, out var normalized))
+    {
+        logger.LogWarning("Rejecting invalid UPN input on manager read");
+        return Results.Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Invalid UPN",
+            detail: "UPN must be in the form user@domain.tld and contain only allowed characters.");
+    }
+
+    logger.LogInformation("Reading AD manager for UPN {Upn}", normalized);
+
+    var result = await service.GetManagerAsync(normalized, cancellationToken);
+
+    return result switch
+    {
+        AdManagerReadResult.Found f => Results.Ok(f.Response),
+        AdManagerReadResult.NotFound nf => Results.Problem(
+            statusCode: StatusCodes.Status404NotFound,
+            title: "AD user not found",
+            detail: $"No Active Directory user with UPN '{nf.Upn}'."),
+        AdManagerReadResult.Error => Results.Problem(
+            statusCode: StatusCodes.Status500InternalServerError,
+            title: "Active Directory PowerShell call failed",
+            detail: "See server logs for details."),
+        _ => Results.Problem(statusCode: StatusCodes.Status500InternalServerError)
+    };
+})
+.AddEndpointFilter<ApiKeyEndpointFilter>()
+.WithName("GetAdUserManager")
+.Produces<SmartLockoutApi.Dtos.AdUserManagerResponse>(StatusCodes.Status200OK)
+.ProducesProblem(StatusCodes.Status400BadRequest)
+.ProducesProblem(StatusCodes.Status401Unauthorized)
+.ProducesProblem(StatusCodes.Status404NotFound)
+.ProducesProblem(StatusCodes.Status500InternalServerError);
+
+// State-changing endpoint, gated only by the shared API key, so every attempt
+// is logged at Information with caller IP, target UPN, new manager, and (on
+// success) the previous manager so a change can be reversed from the logs.
+// Search logs for `AUDIT update-ad-manager`.
+app.MapPatch("/api/ad/user/{upn}/manager", async (
+    string upn,
+    SmartLockoutApi.Dtos.UpdateAdUserManagerRequest? request,
+    HttpContext http,
+    IAdUserDirectoryService service,
+    ILogger<Program> logger,
+    CancellationToken cancellationToken) =>
+{
+    if (!UpnValidator.TryValidate(upn, out var normalized))
+    {
+        logger.LogWarning("Rejecting invalid UPN input on manager update");
+        return Results.Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Invalid UPN",
+            detail: "UPN must be in the form user@domain.tld and contain only allowed characters.");
+    }
+
+    // null/omitted → leave unchanged; "" → clear; non-empty → manager UPN.
+    var manager = request?.Manager;
+
+    if (manager is null)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Nothing to update",
+            detail: "Provide 'manager' as the manager's UPN. Use \"\" to clear it.");
+    }
+
+    if (manager is { Length: > 0 })
+    {
+        if (!UpnValidator.TryValidate(manager, out var normManager))
+        {
+            return Results.Problem(
+                statusCode: StatusCodes.Status400BadRequest,
+                title: "Invalid manager",
+                detail: "'manager' must be a UPN in the form user@domain.tld.");
+        }
+        manager = normManager;
+
+        // Cheap pre-check; the service also compares resolved DNs.
+        if (manager == normalized)
+        {
+            return Results.Problem(
+                statusCode: StatusCodes.Status400BadRequest,
+                title: "Invalid manager",
+                detail: "A user cannot be their own manager.");
+        }
+    }
+
+    var caller = http.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    var newManager = manager.Length == 0 ? "cleared" : manager;
+    logger.LogInformation("AUDIT update-ad-manager request: caller {Caller} target {Upn} manager {Manager}", caller, normalized, newManager);
+
+    var result = await service.UpdateManagerAsync(
+        normalized,
+        new SmartLockoutApi.Dtos.UpdateAdUserManagerRequest(manager),
+        cancellationToken);
+
+    IResult ManagerRejected(string reason, string detail)
+    {
+        logger.LogInformation("AUDIT update-ad-manager rejected: caller {Caller} target {Upn} manager {Manager} reason {Reason}", caller, normalized, newManager, reason);
+        return Results.Problem(
+            statusCode: StatusCodes.Status422UnprocessableEntity,
+            title: "Invalid manager",
+            detail: detail,
+            extensions: new Dictionary<string, object?> { ["field"] = "manager" });
+    }
+
+    switch (result)
+    {
+        case AdManagerUpdateResult.Success s:
+            logger.LogInformation("AUDIT update-ad-manager success: caller {Caller} target {Upn} manager {Manager} previous {Previous}", caller, normalized, newManager, s.PreviousManagerUpn ?? "none");
+            return Results.NoContent();
+        case AdManagerUpdateResult.NotFound nf:
+            logger.LogInformation("AUDIT update-ad-manager not-found: caller {Caller} target {Upn}", caller, normalized);
+            return Results.Problem(
+                statusCode: StatusCodes.Status404NotFound,
+                title: "AD user not found",
+                detail: $"No Active Directory user with UPN '{nf.Upn}'.");
+        case AdManagerUpdateResult.ManagerNotFound mnf:
+            return ManagerRejected("not-found", $"No Active Directory user with UPN '{mnf.ManagerUpn}'.");
+        case AdManagerUpdateResult.ManagerDisabled md:
+            return ManagerRejected("disabled", $"Active Directory user '{md.ManagerUpn}' is disabled.");
+        case AdManagerUpdateResult.SelfManager:
+            logger.LogInformation("AUDIT update-ad-manager rejected: caller {Caller} target {Upn} manager {Manager} reason {Reason}", caller, normalized, newManager, "self");
+            return Results.Problem(
+                statusCode: StatusCodes.Status400BadRequest,
+                title: "Invalid manager",
+                detail: "A user cannot be their own manager.");
+        case AdManagerUpdateResult.Error err:
+            logger.LogWarning("AUDIT update-ad-manager failed: caller {Caller} target {Upn} error {Error}", caller, normalized, err.Message);
+            return Results.Problem(
+                statusCode: StatusCodes.Status500InternalServerError,
+                title: "Active Directory PowerShell call failed",
+                detail: "See server logs for details.");
+        default:
+            return Results.Problem(statusCode: StatusCodes.Status500InternalServerError);
+    }
+})
+.AddEndpointFilter<ApiKeyEndpointFilter>()
+.WithName("UpdateAdUserManager")
+.Produces(StatusCodes.Status204NoContent)
+.ProducesProblem(StatusCodes.Status400BadRequest)
+.ProducesProblem(StatusCodes.Status401Unauthorized)
+.ProducesProblem(StatusCodes.Status404NotFound)
+.ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+.ProducesProblem(StatusCodes.Status500InternalServerError);
+
 app.Run();

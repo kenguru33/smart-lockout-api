@@ -21,6 +21,8 @@ AD FS / domain controllers.
 | PATCH  | `/api/ad/user/{upn}/phone`             | `Set-ADUser` — partial update; AUDIT logged |
 | GET    | `/api/ad/user/{upn}/department`        | `Get-ADUser` returning `department` |
 | PATCH  | `/api/ad/user/{upn}/department`        | `Set-ADUser` — set/clear `department`; AUDIT logged |
+| GET    | `/api/ad/user/{upn}/manager`           | `Get-ADUser` returning the manager's UPN + display name |
+| PATCH  | `/api/ad/user/{upn}/manager`           | `Set-ADUser` — set/clear `manager` by UPN; AUDIT logged with previous manager |
 
 All endpoints **except `/health`** are gated by an `X-API-Key` header
 (see §4.3). State-changing endpoints emit an `AUDIT` log line on every
@@ -32,9 +34,10 @@ Status codes (consistent across endpoints):
 |------|-------------------------------------------------------------------|
 | 200  | Read endpoint, record returned                                    |
 | 204  | State-changing endpoint succeeded (reset / patch)                 |
-| 400  | UPN failed validation, PATCH body had no actionable fields, phone number is not a valid Norwegian number, or department failed validation |
+| 400  | UPN failed validation, PATCH body had no actionable fields, phone number is not a valid Norwegian number, department failed validation, manager is not a valid UPN, or a user was set as their own manager |
 | 401  | Missing / wrong / no-keys-configured API key                      |
 | 404  | No matching AD FS activity record or AD user                      |
+| 422  | Manager UPN does not exist or is a disabled account (body names the `manager` field) |
 | 500  | PowerShell call failed (module missing, AD unreachable, etc.)     |
 
 Smart-lockout 200 response (camelCase JSON):
@@ -79,6 +82,21 @@ text, trimmed, max 64 characters, no control characters):
 
 ```json
 { "department": "Sales" }
+```
+
+Manager read 200 response (manager fields are `null` when no manager is set,
+or the stored reference doesn't resolve to a user; the DN is never returned):
+
+```json
+{ "userPrincipalName": "user@contoso.com", "managerUserPrincipalName": "boss@contoso.com", "managerDisplayName": "Bo Boss" }
+```
+
+Manager PATCH body — `null`/omitted = rejected with 400, `""` = clear the
+manager, non-empty = the manager's UPN (must be an existing, enabled user and
+not the target itself):
+
+```json
+{ "manager": "boss@contoso.com" }
 ```
 
 ---
@@ -220,6 +238,27 @@ curl -i -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
 ```
 
 Expect 204. Send `{"department":""}` to clear it.
+
+### Read the manager
+
+```bash
+curl -s -H "X-API-Key: $KEY" https://$HOST:5199/api/ad/user/$UPN/manager
+```
+
+```json
+{ "userPrincipalName": "alice@example.com", "managerUserPrincipalName": "bob@example.com", "managerDisplayName": "Bob Example" }
+```
+
+### Set the manager
+
+```bash
+curl -i -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"manager":"bob@example.com"}' \
+  https://$HOST:5199/api/ad/user/$UPN/manager
+```
+
+Expect 204. Send `{"manager":""}` to clear it. An unknown or disabled
+manager returns 422.
 
 ### Error paths (no AD round-trip needed)
 

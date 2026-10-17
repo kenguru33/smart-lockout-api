@@ -350,6 +350,143 @@ public sealed class PowerShellAdUserDirectoryService : IAdUserDirectoryService, 
         }
     }
 
+    public async Task<AdManagerReadResult> GetManagerAsync(string upn, CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var (notFound, error, user) = await FindUserAsync(
+                "LDAPFilter", BuildUpnLdapFilter(upn), new[] { "Manager" }, upn, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (notFound) return new AdManagerReadResult.NotFound(upn);
+            if (error is not null) return new AdManagerReadResult.Error(error);
+
+            var targetUpn = ReadString(user!, "UserPrincipalName") ?? upn;
+            var managerDn = ReadString(user!, "Manager");
+            if (managerDn is null)
+            {
+                return new AdManagerReadResult.Found(new AdUserManagerResponse(targetUpn, null, null));
+            }
+
+            var (managerError, manager) =
+                await ResolveUserByDnAsync(managerDn, upn, cancellationToken).ConfigureAwait(false);
+            if (managerError is not null) return new AdManagerReadResult.Error(managerError);
+
+            return new AdManagerReadResult.Found(new AdUserManagerResponse(
+                UserPrincipalName: targetUpn,
+                ManagerUserPrincipalName: manager?.Upn,
+                ManagerDisplayName: manager?.DisplayName));
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<AdManagerUpdateResult> UpdateManagerAsync(
+        string upn,
+        UpdateAdUserManagerRequest request,
+        CancellationToken cancellationToken)
+    {
+        // Gated steps: (1) resolve the target and its current manager, (2) resolve
+        // and vet the new manager, (3) resolve the previous manager's UPN for the
+        // audit trail, (4) apply. A non-empty manager UPN is assumed already
+        // validated/normalized by the endpoint.
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var (notFound, error, target) = await FindUserAsync(
+                "LDAPFilter", BuildUpnLdapFilter(upn), new[] { "Manager" }, upn, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (notFound) return new AdManagerUpdateResult.NotFound(upn);
+            if (error is not null) return new AdManagerUpdateResult.Error(error);
+
+            var targetDn = ReadString(target!, "DistinguishedName");
+            if (targetDn is null) return new AdManagerUpdateResult.Error("Resolved AD user had no DistinguishedName.");
+
+            // "" → clear; non-empty → set. (null is rejected by the endpoint.)
+            var managerUpn = request.Manager!;
+            string? managerDn = null;
+            if (managerUpn.Length > 0)
+            {
+                var (managerNotFound, managerError, manager) = await FindUserAsync(
+                    "LDAPFilter", BuildUpnLdapFilter(managerUpn), Array.Empty<string>(), managerUpn, cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (managerNotFound) return new AdManagerUpdateResult.ManagerNotFound(managerUpn);
+                if (managerError is not null) return new AdManagerUpdateResult.Error(managerError);
+
+                if (manager!.Properties["Enabled"]?.Value is not true)
+                {
+                    return new AdManagerUpdateResult.ManagerDisabled(managerUpn);
+                }
+
+                managerDn = ReadString(manager, "DistinguishedName");
+                if (managerDn is null) return new AdManagerUpdateResult.Error("Resolved manager had no DistinguishedName.");
+
+                // Compare resolved DNs so a UPN alias can't bypass the endpoint's check.
+                if (string.Equals(managerDn, targetDn, StringComparison.OrdinalIgnoreCase))
+                {
+                    return new AdManagerUpdateResult.SelfManager(upn);
+                }
+            }
+
+            // Best effort: an unresolvable previous manager is recorded as null
+            // rather than blocking the update.
+            string? previousUpn = null;
+            var previousDn = ReadString(target!, "Manager");
+            if (previousDn is not null)
+            {
+                var (_, previous) =
+                    await ResolveUserByDnAsync(previousDn, upn, cancellationToken).ConfigureAwait(false);
+                previousUpn = previous?.Upn;
+            }
+
+            using var ps = PowerShell.Create();
+            ps.Runspace = _runspace;
+
+            // Both DNs come from AD lookups and are bound as typed parameters.
+            var set = ps.AddCommand("Set-ADUser").AddParameter("Identity", targetDn);
+            if (managerDn is null) set.AddParameter("Clear", new[] { "manager" });
+            else set.AddParameter("Manager", managerDn);
+
+            try
+            {
+                await ps.InvokeAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Set-ADUser invocation threw for UPN {Upn}", upn);
+                return new AdManagerUpdateResult.Error($"PowerShell invocation failed: {ex.Message}");
+            }
+
+            if (ps.HadErrors)
+            {
+                var firstError = ps.Streams.Error.FirstOrDefault();
+                if (firstError?.CategoryInfo?.Category == ErrorCategory.ObjectNotFound)
+                {
+                    return new AdManagerUpdateResult.NotFound(upn);
+                }
+
+                var message = firstError?.ToString() ?? "Unknown PowerShell error";
+                _logger.LogError("Set-ADUser reported errors for UPN {Upn}: {Message}", upn, message);
+                return new AdManagerUpdateResult.Error(message);
+            }
+
+            return new AdManagerUpdateResult.Success(upn, previousUpn);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     // Resolves the UPN to a DistinguishedName. Returns NotFound=true when the
     // user is absent, a non-null Error message on failure, or a non-null Dn on
     // success — attribute-agnostic so every Update*Async can map it into its own
@@ -357,9 +494,59 @@ public sealed class PowerShellAdUserDirectoryService : IAdUserDirectoryService, 
     private async Task<(bool NotFound, string? Error, string? Dn)> ResolveDistinguishedNameAsync(
         string upn, CancellationToken cancellationToken)
     {
+        var (notFound, error, user) = await FindUserAsync(
+            "LDAPFilter", BuildUpnLdapFilter(upn), Array.Empty<string>(), upn, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (notFound || error is not null) return (notFound, error, null);
+
+        var dn = ReadString(user!, "DistinguishedName");
+        if (string.IsNullOrEmpty(dn))
+        {
+            return (false, "Resolved AD user had no DistinguishedName.", null);
+        }
+
+        return (false, null, dn);
+    }
+
+    // Resolves a manager DN stored in AD to the manager's UPN and display name.
+    // Returns a null user (no error) when the DN is not a user object or no longer
+    // exists — a dangling reference or a contact — and logs a Warning without the
+    // DN. Caller holds the gate.
+    private async Task<(string? Error, (string Upn, string? DisplayName)? User)> ResolveUserByDnAsync(
+        string dn, string targetUpn, CancellationToken cancellationToken)
+    {
+        var (notFound, error, user) = await FindUserAsync(
+            "Identity", dn, new[] { "DisplayName" }, targetUpn, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (error is not null) return (error, null);
+
+        var managerUpn = notFound ? null : ReadString(user!, "UserPrincipalName");
+        if (managerUpn is null)
+        {
+            _logger.LogWarning("Manager reference on AD user {Upn} does not resolve to a user with a UPN", targetUpn);
+            return (null, null);
+        }
+
+        return (null, (managerUpn, ReadString(user!, "DisplayName")));
+    }
+
+    // Runs Get-ADUser with one lookup parameter (LDAPFilter or Identity), both
+    // bound as typed parameters. Returns NotFound=true when the user is absent,
+    // a non-null Error message on failure, or the first user on success.
+    // Caller holds the gate.
+    private async Task<(bool NotFound, string? Error, PSObject? User)> FindUserAsync(
+        string lookupParameter,
+        string lookupValue,
+        string[] properties,
+        string upnForLogs,
+        CancellationToken cancellationToken)
+    {
         using var ps = PowerShell.Create();
         ps.Runspace = _runspace;
-        ps.AddCommand("Get-ADUser").AddParameter("LDAPFilter", BuildUpnLdapFilter(upn));
+        var get = ps.AddCommand("Get-ADUser").AddParameter(lookupParameter, lookupValue);
+        if (properties.Length > 0) get.AddParameter("Properties", properties);
 
         PSDataCollection<PSObject> results;
         try
@@ -372,7 +559,7 @@ public sealed class PowerShellAdUserDirectoryService : IAdUserDirectoryService, 
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Get-ADUser (resolve) invocation threw for UPN {Upn}", upn);
+            _logger.LogError(ex, "Get-ADUser (resolve) invocation threw for UPN {Upn}", upnForLogs);
             return (false, $"PowerShell invocation failed: {ex.Message}", null);
         }
 
@@ -385,7 +572,7 @@ public sealed class PowerShellAdUserDirectoryService : IAdUserDirectoryService, 
             }
 
             var message = firstError?.ToString() ?? "Unknown PowerShell error";
-            _logger.LogError("Get-ADUser (resolve) reported errors for UPN {Upn}: {Message}", upn, message);
+            _logger.LogError("Get-ADUser (resolve) reported errors for UPN {Upn}: {Message}", upnForLogs, message);
             return (false, message, null);
         }
 
@@ -394,13 +581,7 @@ public sealed class PowerShellAdUserDirectoryService : IAdUserDirectoryService, 
             return (true, null, null);
         }
 
-        var dn = ReadString(results[0], "DistinguishedName");
-        if (string.IsNullOrEmpty(dn))
-        {
-            return (false, "Resolved AD user had no DistinguishedName.", null);
-        }
-
-        return (false, null, dn);
+        return (false, null, results[0]);
     }
 
     // Cheapest LDAP probe — Get-ADRootDSE returns the directory root entry

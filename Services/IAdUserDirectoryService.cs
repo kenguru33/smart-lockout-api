@@ -18,6 +18,13 @@ public interface IAdUserDirectoryService
         UpdateAdUserDepartmentRequest request,
         CancellationToken cancellationToken);
 
+    Task<AdManagerReadResult> GetManagerAsync(string upn, CancellationToken cancellationToken);
+
+    Task<AdManagerUpdateResult> UpdateManagerAsync(
+        string upn,
+        UpdateAdUserManagerRequest request,
+        CancellationToken cancellationToken);
+
     // Health probe: confirms a domain controller is reachable via LDAP.
     // Throws on failure or timeout; returns on success. Used by AdHealthCheck.
     Task PingAsync(CancellationToken cancellationToken);
