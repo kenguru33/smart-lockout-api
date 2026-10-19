@@ -225,9 +225,10 @@ Manager is different from those attributes in two ways:
 
 1. ~~**Authorization:**~~ **Resolved.** Reuse the shared `X-API-Key` while
    there is a single consumer, with OU-scoped `manager`-only delegation and
-   a reversible audit trail as compensating controls. The auth rework is
-   required before any further state-changing endpoint or a second
-   consumer.
+   a reversible audit trail as compensating controls. Per `CLAUDE.md`, the
+   auth rework is required once there is a second consumer or a need for
+   per-caller identity. From then on, no further state-changing endpoint
+   may be added before the rework is done.
 2. ~~**Manager-not-found status:**~~ **Resolved.** 422 with RFC 9457 problem
    details. 404 is reserved for the target user in the URL.
 3. ~~**Read response shape:**~~ **Resolved.** Target UPN, manager UPN and
