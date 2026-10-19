@@ -6,8 +6,9 @@ namespace SmartLockoutApi.Tests;
 // In-memory stand-in for the PowerShell-backed directory service. Holds a few
 // synthetic users and mirrors the manager contract of the real service:
 // unknown target → NotFound, unknown manager → ManagerNotFound, disabled
-// manager → ManagerDisabled, same DN → SelfManager. Only the manager methods
-// are implemented; the others are not exercised by these tests.
+// manager → ManagerDisabled, same DN → SelfManager. Title follows the
+// department-style contract (unknown target → NotFound, "" → clear). Only the
+// manager and title methods are implemented; the others are not exercised.
 public sealed class FakeAdUserDirectoryService : IAdUserDirectoryService
 {
     public sealed class User(string dn, string upn, string displayName, bool enabled)
@@ -17,6 +18,7 @@ public sealed class FakeAdUserDirectoryService : IAdUserDirectoryService
         public string DisplayName { get; } = displayName;
         public bool Enabled { get; } = enabled;
         public string? ManagerDn { get; set; }
+        public string? Title { get; set; }
     }
 
     private readonly Dictionary<string, User> _byUpn = new(StringComparer.OrdinalIgnoreCase);
@@ -26,7 +28,10 @@ public sealed class FakeAdUserDirectoryService : IAdUserDirectoryService
     // must leave this at zero.
     public int ManagerCalls { get; private set; }
 
-    // When set, every manager call returns Error with this message.
+    // Number of title calls that reached the service.
+    public int TitleCalls { get; private set; }
+
+    // When set, every manager and title call returns Error with this message.
     public string? FailWith { get; set; }
 
     public FakeAdUserDirectoryService Add(User user)
@@ -43,6 +48,9 @@ public sealed class FakeAdUserDirectoryService : IAdUserDirectoryService
         _byUpn[aliasUpn] = _byUpn[upn];
         return this;
     }
+
+    // The user's current title, read straight from the fake store.
+    public string? TitleOf(string upn) => _byUpn[upn].Title;
 
     // The UPN of the user's current manager, read straight from the fake store.
     public string? ManagerUpnOf(string upn) =>
@@ -82,6 +90,30 @@ public sealed class FakeAdUserDirectoryService : IAdUserDirectoryService
         return Result(new AdManagerUpdateResult.Success(upn, previous));
 
         static Task<AdManagerUpdateResult> Result(AdManagerUpdateResult r) => Task.FromResult(r);
+    }
+
+    public Task<AdTitleReadResult> GetTitleAsync(string upn, CancellationToken cancellationToken)
+    {
+        TitleCalls++;
+        if (FailWith is not null) return Task.FromResult<AdTitleReadResult>(new AdTitleReadResult.Error(FailWith));
+        if (!_byUpn.TryGetValue(upn, out var user)) return Task.FromResult<AdTitleReadResult>(new AdTitleReadResult.NotFound(upn));
+
+        return Task.FromResult<AdTitleReadResult>(new AdTitleReadResult.Found(new AdUserTitleResponse(user.Upn, user.Title)));
+    }
+
+    public Task<AdTitleUpdateResult> UpdateTitleAsync(
+        string upn,
+        UpdateAdUserTitleRequest request,
+        CancellationToken cancellationToken)
+    {
+        TitleCalls++;
+        if (FailWith is not null) return Task.FromResult<AdTitleUpdateResult>(new AdTitleUpdateResult.Error(FailWith));
+        if (!_byUpn.TryGetValue(upn, out var user)) return Task.FromResult<AdTitleUpdateResult>(new AdTitleUpdateResult.NotFound(upn));
+
+        // "" → clear; non-empty → set. (null is rejected by the endpoint.)
+        var previous = user.Title;
+        user.Title = request.Title!.Length == 0 ? null : request.Title;
+        return Task.FromResult<AdTitleUpdateResult>(new AdTitleUpdateResult.Success(upn, previous));
     }
 
     public Task<AdPhoneReadResult> GetPhoneAsync(string upn, CancellationToken cancellationToken) =>

@@ -23,7 +23,7 @@ Write these down — every later step references them.
 | `<hostname>`           | `api.example.no`                                           | Public FQDN of the API. Must have an A/AAAA record reaching the AD FS server, and the DNS zone must support TXT updates via API (for DNS-01). |
 | `<install-path>`       | `C:\Program Files\SmartLockoutApi`                          | Where the published artefacts and `deploy/` folder land on the AD FS server. |
 | `<service-account>`    | `EXAMPLE\svc-smartlockout`                                  | AD service account that the Windows service runs as. Created in Step 3. |
-| `<user-ou>`            | `OU=Users,DC=example,DC=com`                                | OU containing users whose `mobile`/`telephoneNumber`/`department`/`manager` may be updated. |
+| `<user-ou>`            | `OU=Users,DC=example,DC=com`                                | OU containing users whose `mobile`/`telephoneNumber`/`department`/`manager`/`title` may be updated. |
 | `<dns-provider>`       | Cloudflare, Azure DNS, Route 53, etc.                       | win-acme has plugins for the common ones. |
 
 ---
@@ -359,6 +359,14 @@ curl -ik -H "X-API-Key: $apiKey" https://127.0.0.1:5199/api/ad/user/<real-upn>/m
 curl -ik -H "X-API-Key: $apiKey" -H "Content-Type: application/json" `
      -X PATCH -d '{"manager":"nobody@example.invalid"}' `
      https://127.0.0.1:5199/api/ad/user/<real-upn>/manager  # → 422
+
+# 8. Title read — 200 / 404
+curl -ik -H "X-API-Key: $apiKey" https://127.0.0.1:5199/api/ad/user/<real-upn>/title
+
+# 9. Title update (rejected — longer than 128 characters)
+curl -ik -H "X-API-Key: $apiKey" -H "Content-Type: application/json" `
+     -X PATCH -d ('{"title":"' + ('x' * 129) + '"}') `
+     https://127.0.0.1:5199/api/ad/user/<real-upn>/title    # → 400
 ```
 
 Then test from a remote host using the real hostname (no `-k`, the cert

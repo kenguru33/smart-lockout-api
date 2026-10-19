@@ -487,6 +487,95 @@ public sealed class PowerShellAdUserDirectoryService : IAdUserDirectoryService, 
         }
     }
 
+    public async Task<AdTitleReadResult> GetTitleAsync(string upn, CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var (notFound, error, user) = await FindUserAsync(
+                "LDAPFilter", BuildUpnLdapFilter(upn), new[] { "Title" }, upn, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (notFound) return new AdTitleReadResult.NotFound(upn);
+            if (error is not null) return new AdTitleReadResult.Error(error);
+
+            return new AdTitleReadResult.Found(new AdUserTitleResponse(
+                UserPrincipalName: ReadString(user!, "UserPrincipalName") ?? upn,
+                Title: ReadString(user!, "Title")));
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<AdTitleUpdateResult> UpdateTitleAsync(
+        string upn,
+        UpdateAdUserTitleRequest request,
+        CancellationToken cancellationToken)
+    {
+        // Two gated steps: (1) resolve the user and its current title (for the
+        // audit trail), then (2) apply the change. A non-empty value is assumed
+        // already validated/normalized by the endpoint.
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var (notFound, error, user) = await FindUserAsync(
+                "LDAPFilter", BuildUpnLdapFilter(upn), new[] { "Title" }, upn, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (notFound) return new AdTitleUpdateResult.NotFound(upn);
+            if (error is not null) return new AdTitleUpdateResult.Error(error);
+
+            var distinguishedName = ReadString(user!, "DistinguishedName");
+            if (distinguishedName is null) return new AdTitleUpdateResult.Error("Resolved AD user had no DistinguishedName.");
+            var previousTitle = ReadString(user!, "Title");
+
+            using var ps = PowerShell.Create();
+            ps.Runspace = _runspace;
+
+            // DistinguishedName is bound as a typed parameter, never interpolated.
+            var set = ps.AddCommand("Set-ADUser").AddParameter("Identity", distinguishedName);
+
+            // "" → clear; non-empty → set. (null is rejected by the endpoint.)
+            if (request.Title!.Length == 0) set.AddParameter("Clear", new[] { "title" });
+            else set.AddParameter("Title", request.Title);
+
+            try
+            {
+                await ps.InvokeAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Set-ADUser invocation threw for UPN {Upn}", upn);
+                return new AdTitleUpdateResult.Error($"PowerShell invocation failed: {ex.Message}");
+            }
+
+            if (ps.HadErrors)
+            {
+                var firstError = ps.Streams.Error.FirstOrDefault();
+                if (firstError?.CategoryInfo?.Category == ErrorCategory.ObjectNotFound)
+                {
+                    return new AdTitleUpdateResult.NotFound(upn);
+                }
+
+                var message = firstError?.ToString() ?? "Unknown PowerShell error";
+                _logger.LogError("Set-ADUser reported errors for UPN {Upn}: {Message}", upn, message);
+                return new AdTitleUpdateResult.Error(message);
+            }
+
+            return new AdTitleUpdateResult.Success(upn, previousTitle);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     // Resolves the UPN to a DistinguishedName. Returns NotFound=true when the
     // user is absent, a non-null Error message on failure, or a non-null Dn on
     // success — attribute-agnostic so every Update*Async can map it into its own
