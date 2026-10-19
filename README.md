@@ -23,6 +23,8 @@ AD FS / domain controllers.
 | PATCH  | `/api/ad/user/{upn}/department`        | `Set-ADUser` — set/clear `department`; AUDIT logged |
 | GET    | `/api/ad/user/{upn}/manager`           | `Get-ADUser` returning the manager's UPN + display name |
 | PATCH  | `/api/ad/user/{upn}/manager`           | `Set-ADUser` — set/clear `manager` by UPN; AUDIT logged with previous manager |
+| GET    | `/api/ad/user/{upn}/title`             | `Get-ADUser` returning `title` (job title) |
+| PATCH  | `/api/ad/user/{upn}/title`             | `Set-ADUser` — set/clear `title`; AUDIT logged with previous title |
 
 All endpoints **except `/health`** are gated by an `X-API-Key` header
 (see §4.3). State-changing endpoints emit an `AUDIT` log line on every
@@ -34,7 +36,7 @@ Status codes (consistent across endpoints):
 |------|-------------------------------------------------------------------|
 | 200  | Read endpoint, record returned                                    |
 | 204  | State-changing endpoint succeeded (reset / patch)                 |
-| 400  | UPN failed validation, PATCH body had no actionable fields, phone number is not a valid Norwegian number, department failed validation, manager is not a valid UPN, or a user was set as their own manager |
+| 400  | UPN failed validation, PATCH body had no actionable fields, phone number is not a valid Norwegian number, department or title failed validation, manager is not a valid UPN, or a user was set as their own manager |
 | 401  | Missing / wrong / no-keys-configured API key                      |
 | 404  | No matching AD FS activity record or AD user                      |
 | 422  | Manager UPN does not exist or is a disabled account (body names the `manager` field) |
@@ -97,6 +99,20 @@ not the target itself):
 
 ```json
 { "manager": "boss@contoso.com" }
+```
+
+Title read 200 response (`title` is `null` when unset in AD):
+
+```json
+{ "userPrincipalName": "user@contoso.com", "title": "Senior Engineer" }
+```
+
+Title PATCH body — `null`/omitted = rejected with 400, `""` = clear the
+attribute, non-empty = set (free text, trimmed, max 128 characters — the AD
+and Entra ID limit — no control characters):
+
+```json
+{ "title": "Senior Engineer" }
 ```
 
 ---
@@ -259,6 +275,26 @@ curl -i -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
 
 Expect 204. Send `{"manager":""}` to clear it. An unknown or disabled
 manager returns 422.
+
+### Read the job title
+
+```bash
+curl -s -H "X-API-Key: $KEY" https://$HOST:5199/api/ad/user/$UPN/title
+```
+
+```json
+{ "userPrincipalName": "alice@example.com", "title": "Senior Engineer" }
+```
+
+### Set the job title
+
+```bash
+curl -i -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"title":"Senior Engineer"}' \
+  https://$HOST:5199/api/ad/user/$UPN/title
+```
+
+Expect 204. Send `{"title":""}` to clear it.
 
 ### Error paths (no AD round-trip needed)
 

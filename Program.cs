@@ -681,4 +681,130 @@ app.MapPatch("/api/ad/user/{upn}/manager", async (
 .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
 .ProducesProblem(StatusCodes.Status500InternalServerError);
 
+// Read the AD job title for a UPN. Read-only — no AUDIT line.
+// 500 detail is generic; the PowerShell error is logged server-side only.
+app.MapGet("/api/ad/user/{upn}/title", async (
+    string upn,
+    IAdUserDirectoryService service,
+    ILogger<Program> logger,
+    CancellationToken cancellationToken) =>
+{
+    if (!UpnValidator.TryValidate(upn, out var normalized))
+    {
+        logger.LogWarning("Rejecting invalid UPN input on title read");
+        return Results.Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Invalid UPN",
+            detail: "UPN must be in the form user@domain.tld and contain only allowed characters.");
+    }
+
+    logger.LogInformation("Reading AD title for UPN {Upn}", normalized);
+
+    var result = await service.GetTitleAsync(normalized, cancellationToken);
+
+    return result switch
+    {
+        AdTitleReadResult.Found f => Results.Ok(f.Response),
+        AdTitleReadResult.NotFound nf => Results.Problem(
+            statusCode: StatusCodes.Status404NotFound,
+            title: "AD user not found",
+            detail: $"No Active Directory user with UPN '{nf.Upn}'."),
+        AdTitleReadResult.Error => Results.Problem(
+            statusCode: StatusCodes.Status500InternalServerError,
+            title: "Active Directory PowerShell call failed",
+            detail: "See server logs for details."),
+        _ => Results.Problem(statusCode: StatusCodes.Status500InternalServerError)
+    };
+})
+.AddEndpointFilter<ApiKeyEndpointFilter>()
+.WithName("GetAdUserTitle")
+.Produces<SmartLockoutApi.Dtos.AdUserTitleResponse>(StatusCodes.Status200OK)
+.ProducesProblem(StatusCodes.Status400BadRequest)
+.ProducesProblem(StatusCodes.Status401Unauthorized)
+.ProducesProblem(StatusCodes.Status404NotFound)
+.ProducesProblem(StatusCodes.Status500InternalServerError);
+
+// State-changing endpoint, gated only by the shared API key, so every attempt
+// is logged at Information with caller IP, target UPN and the new title, and
+// (on success) the previous title so a change can be reversed from the logs.
+// Title is non-sensitive directory data, and TitleValidator bans control
+// characters, so the value is safe to log. Search logs for `AUDIT update-ad-title`.
+app.MapPatch("/api/ad/user/{upn}/title", async (
+    string upn,
+    SmartLockoutApi.Dtos.UpdateAdUserTitleRequest? request,
+    HttpContext http,
+    IAdUserDirectoryService service,
+    ILogger<Program> logger,
+    CancellationToken cancellationToken) =>
+{
+    if (!UpnValidator.TryValidate(upn, out var normalized))
+    {
+        logger.LogWarning("Rejecting invalid UPN input on title update");
+        return Results.Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Invalid UPN",
+            detail: "UPN must be in the form user@domain.tld and contain only allowed characters.");
+    }
+
+    // null/omitted → leave unchanged; "" → clear; non-empty → set (validated).
+    var title = request?.Title;
+
+    if (title is null)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Nothing to update",
+            detail: "Provide 'title'. Use \"\" to clear it.");
+    }
+
+    if (title is { Length: > 0 })
+    {
+        if (!TitleValidator.TryValidate(title, out var normTitle))
+        {
+            return Results.Problem(
+                statusCode: StatusCodes.Status400BadRequest,
+                title: "Invalid title",
+                detail: "'title' must be at most 128 characters and contain no control characters.");
+        }
+        title = normTitle;
+    }
+
+    var caller = http.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    var newTitle = title.Length == 0 ? "cleared" : title;
+    logger.LogInformation("AUDIT update-ad-title request: caller {Caller} target {Upn} title {Title}", caller, normalized, newTitle);
+
+    var result = await service.UpdateTitleAsync(
+        normalized,
+        new SmartLockoutApi.Dtos.UpdateAdUserTitleRequest(title),
+        cancellationToken);
+
+    switch (result)
+    {
+        case AdTitleUpdateResult.Success s:
+            logger.LogInformation("AUDIT update-ad-title success: caller {Caller} target {Upn} title {Title} previous {Previous}", caller, normalized, newTitle, s.PreviousTitle ?? "none");
+            return Results.NoContent();
+        case AdTitleUpdateResult.NotFound nf:
+            logger.LogInformation("AUDIT update-ad-title not-found: caller {Caller} target {Upn}", caller, normalized);
+            return Results.Problem(
+                statusCode: StatusCodes.Status404NotFound,
+                title: "AD user not found",
+                detail: $"No Active Directory user with UPN '{nf.Upn}'.");
+        case AdTitleUpdateResult.Error err:
+            logger.LogWarning("AUDIT update-ad-title failed: caller {Caller} target {Upn} error {Error}", caller, normalized, err.Message);
+            return Results.Problem(
+                statusCode: StatusCodes.Status500InternalServerError,
+                title: "Active Directory PowerShell call failed",
+                detail: "See server logs for details.");
+        default:
+            return Results.Problem(statusCode: StatusCodes.Status500InternalServerError);
+    }
+})
+.AddEndpointFilter<ApiKeyEndpointFilter>()
+.WithName("UpdateAdUserTitle")
+.Produces(StatusCodes.Status204NoContent)
+.ProducesProblem(StatusCodes.Status400BadRequest)
+.ProducesProblem(StatusCodes.Status401Unauthorized)
+.ProducesProblem(StatusCodes.Status404NotFound)
+.ProducesProblem(StatusCodes.Status500InternalServerError);
+
 app.Run();

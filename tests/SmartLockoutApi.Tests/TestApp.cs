@@ -20,7 +20,7 @@ internal sealed class TestApp : WebApplicationFactory<Program>
     public FakeAdUserDirectoryService Directory { get; } = new FakeAdUserDirectoryService()
         .Add(new("CN=Bob,OU=Users,DC=test,DC=local", "bob@test.local", "Bob Test", enabled: true))
         .Add(new("CN=Alice,OU=Users,DC=test,DC=local", "alice@test.local", "Alice Test", enabled: true)
-            { ManagerDn = "CN=Bob,OU=Users,DC=test,DC=local" })
+            { ManagerDn = "CN=Bob,OU=Users,DC=test,DC=local", Title = "Senior Engineer" })
         .Add(new("CN=Carol,OU=Users,DC=test,DC=local", "carol@test.local", "Carol Disabled", enabled: false))
         .Add(new("CN=Dan,OU=Users,DC=test,DC=local", "dan@test.local", "Dan Dangling", enabled: true)
             { ManagerDn = "CN=Deleted,OU=Users,DC=test,DC=local" })
@@ -30,6 +30,8 @@ internal sealed class TestApp : WebApplicationFactory<Program>
     public ConcurrentQueue<string> Logs { get; } = new();
 
     public IEnumerable<string> Audit => Logs.Where(l => l.StartsWith("AUDIT update-ad-manager", StringComparison.Ordinal));
+
+    public IEnumerable<string> TitleAudit => Logs.Where(l => l.StartsWith("AUDIT update-ad-title", StringComparison.Ordinal));
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
